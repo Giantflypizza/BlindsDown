@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Pure logic with no Windows calls: the lock engine, journal, restore report, settings,
+    usage sessions and history. Everything here is unit-tested with fake devices.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>BlindsDown.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="BlindsDown.Tests" />
+  </ItemGroup>
+</Project>

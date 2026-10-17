@@ -1,0 +1,7 @@
+<Project>
+  <!-- Imported after every project file, so it can remove items the SDK added. -->
+  <ItemGroup>
+    <!-- The SDK adds "global using System.Net.Http;" by default. BlindsDown never wants it in scope. -->
+    <Using Remove="System.Net.Http" />
+  </ItemGroup>
+</Project>

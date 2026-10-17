@@ -1,0 +1,24 @@
+# Build output
+bin/
+obj/
+artifacts/
+publish/
+*.user
+*.suo
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+TestResults/
+*.trx
+coverage*.xml
+
+# Local runtime data never belongs in the repo
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+

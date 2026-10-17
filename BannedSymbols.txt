@@ -1,0 +1,72 @@
+# BlindsDown never connects to the internet. Anything that can reach the network is banned here.
+# Format: <documentation comment id>;<message>. Violations are build errors (RS0030).
+# A namespace entry (N:) also bans every child namespace.
+
+N:System.Net;BlindsDown must never use the network
+N:Windows.Networking;BlindsDown must never use the network
+N:Windows.Web;BlindsDown must never use the network
+N:System.ServiceModel;BlindsDown must never use the network
+
+# WinForms / .NET types that can fetch URLs or open browsers
+T:System.Windows.Forms.WebBrowser;Can load web content
+T:System.Windows.Forms.WebBrowserBase;Can load web content
+T:System.Windows.Forms.Help;Help.ShowHelp can open URLs
+T:System.Windows.Forms.HelpProvider;HelpProvider can open URLs
+T:System.Windows.Forms.PictureBox;PictureBox has a static HttpClient in .NET 9+ and loads URLs; draw images yourself
+T:System.Windows.Forms.LinkLabel;No clickable links: show URLs as copyable text instead
+M:System.Media.SoundPlayer.#ctor(System.String);Only play sounds from in-memory streams (a string can be a URL)
+P:System.Media.SoundPlayer.SoundLocation;Only play sounds from in-memory streams (a location can be a URL)
+M:System.Media.SoundPlayer.LoadAsync;Only play sounds from in-memory streams
+T:System.Xml.XmlUrlResolver;Can fetch URLs
+M:System.Drawing.Image.FromFile(System.String);Can read from UNC paths; load images from embedded resources
+
+# Starting processes / shell execution (a URL would open a browser). Use the audited SafeShell wrapper.
+M:System.Diagnostics.Process.Start(System.String);Use SafeShell (audited)
+M:System.Diagnostics.Process.Start(System.String,System.String);Use SafeShell (audited)
+M:System.Diagnostics.Process.Start(System.String,System.Collections.Generic.IEnumerable{System.String});Use SafeShell (audited)
+M:System.Diagnostics.Process.Start(System.Diagnostics.ProcessStartInfo);Use SafeShell (audited)
+M:System.Diagnostics.Process.Start;Use SafeShell (audited)
+
+# COM activation by name/CLSID at runtime could reach networking components (WinHTTP, MSXML, BITS).
+# Declare [ComImport] classes instead; the no-network test checks them against an allowlist.
+M:System.Type.GetTypeFromProgID(System.String);Use an allowlisted [ComImport] class
+M:System.Type.GetTypeFromProgID(System.String,System.Boolean);Use an allowlisted [ComImport] class
+M:System.Type.GetTypeFromProgID(System.String,System.String);Use an allowlisted [ComImport] class
+M:System.Type.GetTypeFromProgID(System.String,System.String,System.Boolean);Use an allowlisted [ComImport] class
+M:System.Type.GetTypeFromCLSID(System.Guid);Use an allowlisted [ComImport] class
+M:System.Type.GetTypeFromCLSID(System.Guid,System.Boolean);Use an allowlisted [ComImport] class
+M:System.Type.GetTypeFromCLSID(System.Guid,System.String);Use an allowlisted [ComImport] class
+M:System.Type.GetTypeFromCLSID(System.Guid,System.String,System.Boolean);Use an allowlisted [ComImport] class
+
+# Dynamic native loading would bypass the P/Invoke allowlist test.
+T:System.Runtime.InteropServices.NativeLibrary;Use static [LibraryImport]/[DllImport] so the allowlist test can see it
+
+# Side doors found by the no-network review: late-bound COM/HTTP, generated code, remote machines,
+# certificate checks that download revocation lists, and loading code from paths/URLs.
+N:Microsoft.VisualBasic;Interaction.CreateObject etc. allow COM-by-ProgID (e.g. WinHttp)
+N:System.Reflection.Emit;Generated code would bypass the static no-network scan
+T:System.Windows.Forms.AxHost;ActiveX controls can browse the web
+T:System.Security.Cryptography.X509Certificates.X509Chain;Chain building can download CRL/OCSP/AIA data
+M:System.Security.Cryptography.X509Certificates.X509Certificate2.Verify;Chain building can download CRL/OCSP/AIA data
+M:System.Runtime.InteropServices.Marshal.BindToMoniker(System.String);Monikers can resolve URLs
+M:Microsoft.Win32.RegistryKey.OpenRemoteBaseKey(Microsoft.Win32.RegistryHive,System.String);Remote registry is network access
+M:Microsoft.Win32.RegistryKey.OpenRemoteBaseKey(Microsoft.Win32.RegistryHive,System.String,Microsoft.Win32.RegistryView);Remote registry is network access
+M:System.Reflection.Assembly.LoadFrom(System.String);Loading code from a path or URL is not allowed
+M:System.Reflection.Assembly.LoadFile(System.String);Loading code from a path is not allowed
+M:System.Reflection.Assembly.UnsafeLoadFrom(System.String);Loading code from a path or URL is not allowed
+M:System.Reflection.MethodBase.Invoke(System.Object,System.Object[]);Calling methods by name bypasses the static scan
+
+# Things that can reach other machines or browse network locations (second review round).
+T:System.IO.Pipes.NamedPipeClientStream;Can connect to pipes on other machines; Stage 2 adds one audited local-only wrapper
+T:System.Windows.Forms.OpenFileDialog;Shell file dialogs browse network locations
+T:System.Windows.Forms.SaveFileDialog;Shell file dialogs browse network locations
+T:System.Windows.Forms.FolderBrowserDialog;Shell file dialogs browse network locations
+T:System.Windows.Forms.FileDialog;Shell file dialogs browse network locations
+M:System.Windows.Forms.MessageBox.Show(System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String);A help file path can be a URL
+M:System.Windows.Forms.MessageBox.Show(System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String,System.Windows.Forms.HelpNavigator);A help file path can be a URL
+M:System.Windows.Forms.MessageBox.Show(System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String,System.String);A help file path can be a URL
+M:System.Windows.Forms.MessageBox.Show(System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String,System.Windows.Forms.HelpNavigator,System.Object);A help file path can be a URL
+M:System.Windows.Forms.MessageBox.Show(System.Windows.Forms.IWin32Window,System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String);A help file path can be a URL
+M:System.Windows.Forms.MessageBox.Show(System.Windows.Forms.IWin32Window,System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String,System.Windows.Forms.HelpNavigator);A help file path can be a URL
+M:System.Windows.Forms.MessageBox.Show(System.Windows.Forms.IWin32Window,System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String,System.String);A help file path can be a URL
+M:System.Windows.Forms.MessageBox.Show(System.Windows.Forms.IWin32Window,System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String,System.Windows.Forms.HelpNavigator,System.Object);A help file path can be a URL

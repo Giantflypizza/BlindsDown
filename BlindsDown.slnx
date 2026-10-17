@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BlindsDown.Core/BlindsDown.Core.csproj" />
+    <Project Path="src/BlindsDown/BlindsDown.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BlindsDown.Tests/BlindsDown.Tests.csproj" />
+  </Folder>
+</Solution>

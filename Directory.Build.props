@@ -1,0 +1,37 @@
+<Project>
+  <!-- Settings shared by every project in the repository. -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <Deterministic>true</Deterministic>
+    <Product>BlindsDown</Product>
+    <Company>BlindsDown contributors</Company>
+    <Authors>BlindsDown contributors</Authors>
+    <Copyright>Copyright (c) 2026 BlindsDown contributors</Copyright>
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <NeutralLanguage>en</NeutralLanguage>
+    <!-- Never ship 32-bit: SetupAPI refuses device changes from WOW64 processes. -->
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <!--
+    "BlindsDown never connects to the internet" is enforced at compile time:
+    any use of a symbol listed in BannedSymbols.txt is a build error (RS0030).
+    The analyzer is a build-time tool only; it is not shipped in the app.
+  -->
+  <ItemGroup Condition="'$(IsTestProject)' != 'true'">
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)BannedSymbols.txt" />
+  </ItemGroup>
+  <PropertyGroup Condition="'$(IsTestProject)' != 'true'">
+    <WarningsAsErrors>$(WarningsAsErrors);RS0030;RS0031;RS0035</WarningsAsErrors>
+  </PropertyGroup>
+</Project>
