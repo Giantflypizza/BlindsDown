@@ -35,6 +35,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Microsoft's own package (part of .NET, no third-party code): ServiceBase for the optional helper service. -->
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.13" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="BlindsDown.Tests" />
   </ItemGroup>
 </Project>

@@ -114,6 +114,11 @@ public sealed class ScannerSelfTests
     [InlineData("System.AppDomain", "GetAssemblies", "", false)]
     [InlineData("System.Linq.Expressions.LambdaExpression", "Compile", "", true)]
 
+    [InlineData("System.Windows.Forms.MessageBox", "Show", "System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String", true)]
+    [InlineData("System.Windows.Forms.MessageBox", "Show", "System.Windows.Forms.IWin32Window,System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String,System.Windows.Forms.HelpNavigator,System.Object", true)]
+    [InlineData("System.Windows.Forms.MessageBox", "Show", "System.Windows.Forms.IWin32Window,System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon", false)]
+    [InlineData("System.Windows.Forms.MessageBox", "Show", "System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions", false)]
+
     // Lookups without invoking stay allowed: the System.Text.Json source generator emits these.
     [InlineData("System.Type", "GetProperty", "System.String,System.Reflection.BindingFlags,System.Reflection.Binder,System.Type,System.Type[],System.Reflection.ParameterModifier[]", false)]
     [InlineData("System.Type", "GetConstructor", "System.Reflection.BindingFlags,System.Reflection.Binder,System.Type[],System.Reflection.ParameterModifier[]", false)]
@@ -129,6 +134,11 @@ public sealed class ScannerSelfTests
     [InlineData("System.Reflection.Emit.DynamicMethod", "System.Reflection.Emit", true)]
     [InlineData("System.Reflection.MethodInvoker", "System.Reflection", true)]
     [InlineData("System.Reflection.MethodInfo", "System.Reflection", false)]
+    [InlineData("System.IO.Pipes.NamedPipeClientStream", "System.IO.Pipes", true)]
+    [InlineData("System.IO.Pipes.NamedPipeServerStream", "System.IO.Pipes", false)]
+    [InlineData("System.Windows.Forms.OpenFileDialog", "System.Windows.Forms", true)]
+    [InlineData("System.Windows.Forms.FolderBrowserDialog", "System.Windows.Forms", true)]
+    [InlineData("System.Windows.Forms.ColorDialog", "System.Windows.Forms", false)]
     public void ClassifiesTypeReferences(string fullName, string ns, bool banned) =>
         Assert.Equal(banned, NoNetworkPolicy.BannedTypeReason(new ScannedType(fullName, ns)) is not null);
 
@@ -158,6 +168,44 @@ public sealed class ScannerSelfTests
     [InlineData("OpenProcess", false)]
     public void RecognisesNativeProgramStarters(string entryPoint, bool starter) =>
         Assert.Equal(starter, NoNetworkPolicy.IsNativeProcessStarter(entryPoint));
+
+    [Theory]
+    [InlineData("CreateServiceW", true)]
+    [InlineData("ChangeServiceConfigW", true)]
+    [InlineData("ChangeServiceConfig2W", true)]
+    [InlineData("StartServiceA", true)]
+    [InlineData("StartServiceCtrlDispatcherW", false)]
+    [InlineData("OpenServiceW", false)]
+    [InlineData("QueryServiceConfigW", false)]
+    [InlineData("ControlService", false)]
+    public void RecognisesNativeServiceStarters(string entryPoint, bool starter) =>
+        Assert.Equal(starter, NoNetworkPolicy.IsNativeServiceStarter(entryPoint));
+
+    [Theory]
+    [InlineData("OpenSCManagerW", true)]
+    [InlineData("OpenSCManagerA", true)]
+    [InlineData("RegisterEventSourceW", true)]
+    [InlineData("LsaOpenPolicy", true)]
+    [InlineData("InitiateSystemShutdownExW", true)]
+    [InlineData("LookupAccountSidW", true)]
+    [InlineData("LookupAccountNameW", true)]
+    [InlineData("LookupAccountNameLocalW", false)]
+    [InlineData("OpenServiceW", false)]
+    [InlineData("ReportEventW", false)]
+    public void RecognisesNativeFunctionsThatTakeAComputerName(string entryPoint, bool takesName) =>
+        Assert.Equal(takesName, NoNetworkPolicy.TakesMachineName(entryPoint));
+
+    [Theory]
+    [InlineData("CreateFileW", true)]
+    [InlineData("CreateFile2", true)]
+    [InlineData("WaitNamedPipeW", true)]
+    [InlineData("CallNamedPipeW", true)]
+    [InlineData("NtCreateFile", true)]
+    [InlineData("CreateNamedPipeW", false)]
+    [InlineData("CreateFileMappingW", false)]
+    [InlineData("ReadFile", false)]
+    public void RecognisesNativePathOpeners(string entryPoint, bool opener) =>
+        Assert.Equal(opener, NoNetworkPolicy.IsNativePathOpener(entryPoint));
 
     [Fact]
     public void FindsPInvokesIntoDllsOutsideTheAllowlist()
@@ -211,6 +259,187 @@ public sealed class ScannerSelfTests
         Assert.Contains(process, o => o.Contains("calls native shell32.dll!ShellExecuteExW", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(process, o => o.Contains("calls native kernel32.dll!CreateProcessW", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(process, o => o.StartsWith("System.Diagnostics.Process.dll: Interop+", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void FindsServiceStartsOutsideTheAllowedType()
+    {
+        // Microsoft's ServiceController starts services through StartServiceW, behind a LibraryImport wrapper.
+        List<string> services = Scan(ServiceControllerAssembly, a => NoNetworkPolicy.ServiceStartsOutside(a, SafeShell));
+        Assert.Contains(services, o => o.Contains("System.ServiceProcess.ServiceController.Start(System.String[]) calls native advapi32.dll!StartServiceW", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(services, o => o.Contains("calls System.ServiceProcess.ServiceController.Start(System.String[]) (call)", StringComparison.Ordinal));
+
+        Assert.DoesNotContain(
+            Scan(ServiceControllerAssembly, a => NoNetworkPolicy.ServiceStartsOutside(a, "System.ServiceProcess.ServiceController")),
+            o => o.Contains("!StartServiceW", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void AcceptsOnlyAConstantNullComputerName()
+    {
+        // ServiceController(name, machineName) passes the machine name it was given: another computer.
+        Assert.Contains(
+            Scan(ServiceControllerAssembly, NoNetworkPolicy.RemoteMachineCalls),
+            o => o.Contains("!OpenSCManagerW without a constant null machine name", StringComparison.OrdinalIgnoreCase));
+
+        using var scanner = new AssemblyScanner(typeof(ScannerFixtures).Assembly.Location);
+        List<string> fixtures = [.. NoNetworkPolicy.RemoteMachineCalls(scanner)];
+        Assert.Contains(fixtures, o => o.Contains(Fixture(nameof(ScannerFixtures.OpensAnotherComputersServiceManager)), StringComparison.Ordinal));
+        Assert.Contains(fixtures, o => o.Contains(Fixture(nameof(ScannerFixtures.OpensAServiceManagerChosenAtRunTime)), StringComparison.Ordinal));
+        Assert.Contains(fixtures, o => o.Contains(Fixture(nameof(ScannerFixtures.TakesTheServiceManagerFunction)), StringComparison.Ordinal));
+        Assert.DoesNotContain(fixtures, o => o.Contains(Fixture(nameof(ScannerFixtures.OpensThisComputersServiceManager)), StringComparison.Ordinal));
+        Assert.DoesNotContain(fixtures, o => o.Contains(Fixture(nameof(ScannerFixtures.OpensThisComputersServiceManagerDirectly)), StringComparison.Ordinal));
+        Assert.DoesNotContain(fixtures, o => o.Contains(Fixture(nameof(ScannerFixtures.OpensThisComputersServiceManagerWithADatabase)), StringComparison.Ordinal));
+        Assert.Equal(3, fixtures.Count);
+    }
+
+    [Fact]
+    public void FindsPathOpenersOutsideTheAllowedType()
+    {
+        // NamedPipeClientStream waits for a busy pipe with WaitNamedPipeW, which accepts \\server\pipe\name.
+        Assert.Contains(
+            Scan(Runtime("System.IO.Pipes.dll"), a => NoNetworkPolicy.PathOpenersOutside(a, "BlindsDown.Helper.HelperClient")),
+            o => o.Contains("!WaitNamedPipeW", StringComparison.OrdinalIgnoreCase));
+
+        using var scanner = new AssemblyScanner(typeof(ScannerFixtures).Assembly.Location);
+        string fixtureType = typeof(ScannerFixtures).FullName!;
+        Assert.Contains(
+            NoNetworkPolicy.PathOpenersOutside(scanner, "BlindsDown.Helper.HelperClient"),
+            o => o.Contains(Fixture(nameof(ScannerFixtures.OpensAPathNatively)), StringComparison.Ordinal)
+                && o.Contains(" calls native kernel32!CreateFileW", StringComparison.Ordinal));
+        Assert.DoesNotContain(NoNetworkPolicy.PathOpenersOutside(scanner, fixtureType), o => o.Contains(fixtureType + ".", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void FindsWritesThatMayPutSomethingInAFieldThatMustStayNull()
+    {
+        using var scanner = new AssemblyScanner(typeof(ScannerFixtures).Assembly.Location);
+        string type = typeof(ScannerFixtures.FailureActions).FullName!;
+        List<string> writes = [.. NoNetworkPolicy.NonNullFieldWrites(scanner, type, nameof(ScannerFixtures.FailureActions.Command))];
+
+        Assert.Contains(writes, o => o.Contains(Fixture(nameof(ScannerFixtures.SetsTheCommand)), StringComparison.Ordinal)
+            && o.Contains(" stores a value that may not be null in " + type + ".Command (stfld", StringComparison.Ordinal));
+        Assert.Contains(writes, o => o.Contains(Fixture(nameof(ScannerFixtures.TakesTheCommandsAddress)), StringComparison.Ordinal)
+            && o.Contains(" takes the address of " + type + ".Command (ldflda", StringComparison.Ordinal));
+        Assert.DoesNotContain(writes, o => o.Contains(Fixture(nameof(ScannerFixtures.SetsTheCommandToNull)), StringComparison.Ordinal));
+        Assert.Equal(2, writes.Count);
+    }
+
+    [Fact]
+    public void FindsNativeFunctionsThatOtherAssembliesCouldCall()
+    {
+        using var scanner = new AssemblyScanner(typeof(ScannerFixtures).Assembly.Location);
+        string testAssembly = typeof(ScannerFixtures).Assembly.GetName().Name!;
+        List<string> offenders = [.. NoNetworkPolicy.NativeImportsCallableFromOtherAssemblies(scanner, testAssembly)];
+
+        // A public P/Invoke, and a public LibraryImport wrapper (its inner P/Invoke is private, so only the wrapper counts).
+        string fixtures = typeof(PublicNativeFixtures).FullName!;
+        Assert.Contains(offenders, o => o.Contains($": {fixtures}.{nameof(PublicNativeFixtures.CaretBlinkTime)}() imports user32!GetCaretBlinkTime and can be called", StringComparison.Ordinal));
+        Assert.Contains(offenders, o => o.Contains($": {fixtures}.{nameof(PublicNativeFixtures.DoubleClickTime)}() wraps a native function and can be called", StringComparison.Ordinal));
+        Assert.Equal(2, offenders.Count(o => o.Contains(fixtures, StringComparison.Ordinal)));
+
+        // Private imports and wrappers, and those of an internal type, stay inside their assembly.
+        Assert.DoesNotContain(offenders, o => o.Contains(typeof(ScannerFixtures).FullName + ".", StringComparison.Ordinal));
+
+        // WinForms shares its internal code with its other assemblies: from there its native functions can be called unseen.
+        Assert.Contains(
+            Scan(Desktop("System.Windows.Forms.Primitives.dll"), a => NoNetworkPolicy.NativeImportsCallableFromOtherAssemblies(a, testAssembly)),
+            o => o.StartsWith("System.Windows.Forms.Primitives.dll: shares its internal code with System.Windows.Forms (InternalsVisibleTo)", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("System.Private.CoreLib.dll")]
+    [InlineData("System.Windows.Forms.dll")]
+    public void KnowsTheStackEffectOfEveryInstruction(string fileName)
+    {
+        // The null-argument proof walks the evaluation stack; every instruction kind (calli, vararg calls,
+        // prefixes, newobj on generic types) must have a known effect, or the walk would go wrong.
+        string path = File.Exists(Runtime(fileName)) ? Runtime(fileName) : Desktop(fileName);
+        using var scanner = new AssemblyScanner(path);
+        int checkedInstructions = 0;
+        foreach (MethodDefinitionHandle method in scanner.Metadata.MethodDefinitions)
+        {
+            foreach (ILInstruction instruction in scanner.Instructions(method))
+            {
+                (int pops, int pushes) = scanner.StackEffect(method, instruction);
+                Assert.InRange(pops, 0, 256);
+                Assert.InRange(pushes, 0, 2);
+                checkedInstructions++;
+            }
+        }
+
+        Assert.True(checkedInstructions > 100_000, $"Only {checkedInstructions} instructions decoded in {fileName}.");
+    }
+
+    [Fact]
+    public void EveryBannedSymbolIsAlsoCheckedInTheCompiledProgram()
+    {
+        // BannedSymbols.txt stops these at compile time, but "#pragma warning disable RS0030" switches that off.
+        // Every entry must therefore have a matching rule in this scan, which reads the compiled program.
+        string[] lines = File.ReadAllLines(Path.Combine(RepositoryRoot(), "BannedSymbols.txt"));
+        List<string> entries = [.. lines.Select(l => l.Trim()).Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split(';')[0])];
+        Assert.True(entries.Count > 40, $"Only {entries.Count} entries read from BannedSymbols.txt.");
+
+        List<string> missing = [.. entries.Where(e => !IsCheckedInCompiledProgram(e))];
+        Assert.True(missing.Count == 0, "BannedSymbols.txt entries the compiled-program scan doesn't check:" + Environment.NewLine + string.Join(Environment.NewLine, missing));
+    }
+
+    [Theory]
+    [InlineData("T:System.IO.Pipes.NamedPipeClientStream", true)]
+    [InlineData("M:System.Diagnostics.Process.Start(System.String)", true)]
+    [InlineData("M:System.Media.SoundPlayer.#ctor(System.String)", true)]
+    [InlineData("P:System.Media.SoundPlayer.SoundLocation", true)]
+    [InlineData("N:System.Net", true)]
+    [InlineData("T:System.Windows.Forms.Label", false)]
+    [InlineData("M:System.Media.SoundPlayer.#ctor(System.IO.Stream)", false)]
+    [InlineData("N:System.Collections", false)]
+    public void MatchesBannedSymbolEntriesToScanRules(string entry, bool isChecked) =>
+        Assert.Equal(isChecked, IsCheckedInCompiledProgram(entry));
+
+    /// <summary>
+    /// True when the compiled-program scan rejects what a BannedSymbols.txt entry bans: a namespace (N:), type (T:),
+    /// method (M:, one overload; "#ctor" is a constructor) or property (P:, its setter). Process.Start is allowed only
+    /// in SafeShell, which rule (f) checks.
+    /// </summary>
+    private static bool IsCheckedInCompiledProgram(string entry)
+    {
+        string id = entry[2..];
+        switch (entry[..2])
+        {
+            case "N:":
+                return NoNetworkPolicy.IsNetworkingNamespace(id) || NoNetworkPolicy.BannedTypeReason(new ScannedType(id + ".AnyType", id)) is not null;
+            case "T:":
+                return NoNetworkPolicy.BannedTypeReason(new ScannedType(id, id[..id.LastIndexOf('.')])) is not null;
+            case "P:":
+                int dot = id.LastIndexOf('.');
+                return NoNetworkPolicy.BannedMemberReason(new ScannedMember(id[..dot], "set_" + id[(dot + 1)..], "System.String")) is not null;
+            case "M:":
+                int paren = id.IndexOf('(', StringComparison.Ordinal);
+                string head = paren < 0 ? id : id[..paren];
+                string parameters = paren < 0 ? string.Empty : id[(paren + 1)..^1];
+                int last = head.LastIndexOf('.');
+                string name = head[(last + 1)..] == "#ctor" ? ".ctor" : head[(last + 1)..];
+                var member = new ScannedMember(head[..last], name, parameters);
+                return NoNetworkPolicy.BannedMemberReason(member) is not null || NoNetworkPolicy.IsProcessStart(member);
+            default:
+                return false;
+        }
+    }
+
+    private static string ServiceControllerAssembly => typeof(System.ServiceProcess.ServiceController).Assembly.Location;
+
+    /// <summary>The start of a fixture method's name as the scanner writes it: "Ns.ScannerFixtures.Name(".</summary>
+    private static string Fixture(string methodName) => $"{typeof(ScannerFixtures).FullName}.{methodName}(";
+
+    private static string RepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "BlindsDown.slnx")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new DirectoryNotFoundException("BlindsDown.slnx not found above " + AppContext.BaseDirectory);
     }
 
     [Fact]

@@ -99,13 +99,15 @@ public class VisualQaTests
         float[] scales = [1f, 1.25f, 1.5f, 2f];
         Color[] backgrounds = [Color.White, Color.FromArgb(32, 32, 36), Color.FromArgb(200, 40, 40), Color.FromArgb(240, 170, 30)];
 
-        // Pills on several backgrounds, at every common scale, with their shadow.
+        // Pills on several backgrounds, at every common scale, with their shadow: microphones only, microphones
+        // and cameras, and partial.
+        (LockState State, bool Cameras)[] pills = [(LockState.Locked, false), (LockState.Locked, true), (LockState.PartiallyLocked, true)];
         const int rowHeight = 90;
-        using (var sheet = new Bitmap(1200, rowHeight * backgrounds.Length * 2))
+        using (var sheet = new Bitmap(1300, rowHeight * backgrounds.Length * pills.Length))
         using (Graphics g = Graphics.FromImage(sheet))
         {
             int row = 0;
-            foreach (LockState state in new[] { LockState.Locked, LockState.PartiallyLocked })
+            foreach ((LockState state, bool cameras) in pills)
             {
                 foreach (Color bg in backgrounds)
                 {
@@ -114,7 +116,7 @@ public class VisualQaTests
                     int x = 12;
                     foreach (float scale in scales)
                     {
-                        using Bitmap pill = OverlayPainter.RenderPill(state, scale, out int _);
+                        using Bitmap pill = OverlayPainter.RenderPill(state, scale, out int _, cameras);
                         g.DrawImageUnscaled(pill, x, (row * rowHeight) + 8);
                         x += pill.Width + 16;
                     }
@@ -126,10 +128,32 @@ public class VisualQaTests
             sheet.Save(Path.Combine(dir, "overlay-pills.png"), ImageFormat.Png);
         }
 
-        // OSD flashes, light and dark, every state, at 100% and 150%.
+        // The camera pill zoomed at 100 % and 150 % (nearest neighbour), to check it hugs its text.
+        using (var zoomed = new Bitmap(1300, 260))
+        using (Graphics g = Graphics.FromImage(zoomed))
+        {
+            g.Clear(Color.White);
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            int y = 4;
+            foreach (float scale in new[] { 1f, 1.5f })
+            {
+                using Bitmap pill = OverlayPainter.RenderPill(LockState.Locked, scale, out int _, cameras: true);
+                g.DrawImage(pill, new Rectangle(4, y, pill.Width * 3, pill.Height * 3));
+                y += (pill.Height * 3) + 8;
+            }
+
+            zoomed.Save(Path.Combine(dir, "overlay-pill-camera-zoomed.png"), ImageFormat.Png);
+        }
+
+        // OSD flashes, light and dark, every state (microphones only, then with cameras), at 100% and 150%.
         foreach (float scale in new[] { 1f, 1.5f })
         {
-            LockState[] states = [LockState.Locked, LockState.Unlocked, LockState.PartiallyLocked, LockState.Locking];
+            (LockState State, bool Cameras)[] states =
+            [
+                (LockState.Locked, false), (LockState.Unlocked, false), (LockState.PartiallyLocked, false), (LockState.Locking, false),
+                (LockState.Locked, true), (LockState.Unlocked, true),
+            ];
             int cellWidth = (int)(480 * scale);
             int cellHeight = (int)(150 * scale);
             using var sheet = new Bitmap(cellWidth * 2, cellHeight * states.Length);
@@ -140,12 +164,13 @@ public class VisualQaTests
                 for (int d = 0; d < 2; d++)
                 {
                     bool dark = d == 1;
-                    string? detail = states[i] == LockState.PartiallyLocked ? "Realtek Mikrofon could not be muted (in use by Zoom)" : null;
-                    Size size = OverlayPainter.MeasureOsd(states[i], detail, scale);
+                    (LockState state, bool cameras) = states[i];
+                    string? detail = state == LockState.PartiallyLocked ? "Realtek Mikrofon could not be muted (in use by Zoom)" : null;
+                    Size size = OverlayPainter.MeasureOsd(state, detail, scale, cameras);
                     using var osd = new Bitmap(size.Width, size.Height);
                     using (Graphics og = Graphics.FromImage(osd))
                     {
-                        OverlayPainter.DrawOsd(og, new Rectangle(Point.Empty, size), states[i], detail, scale, dark);
+                        OverlayPainter.DrawOsd(og, new Rectangle(Point.Empty, size), state, detail, scale, dark, cameras);
                     }
 
                     g.DrawImageUnscaled(osd, (d * cellWidth) + 10, (i * cellHeight) + 10);

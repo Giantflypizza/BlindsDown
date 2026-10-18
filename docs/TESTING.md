@@ -14,7 +14,7 @@ dotnet test BlindsDown.slnx
 
 What runs:
 
-- **Logic tests** (`tests/BlindsDown.Tests`): the lock engine with fake microphones (crash at every step,
+- **Logic tests** (`tests/BlindsDown.Tests`): the lock engines with fake microphones and cameras (crash at every step,
   devices unplugged or added while locked, restore report, journal recovery), settings, hotkey parsing,
   usage history. They never touch real devices and always run.
 - **No-network scan** (`tests/BlindsDown.Tests/NoNetwork`): reads the compiled BlindsDown.dll and
@@ -40,6 +40,11 @@ What runs:
 
   (Command Prompt: `set BLINDSDOWN_DEVICE_TESTS=1`, then `dotnet test BlindsDown.slnx`.)
 
+- **Pictures for a visual check (opt-in).** With `BLINDSDOWN_QA_DIR` set to a folder, the tray icon, badge and
+  on-screen confirmation are drawn into PNG files there, including `readme-demo.png`, the picture at the top of
+  the README (copy it to `docs/images/demo.png` when the look changes). With `BLINDSDOWN_DEVICE_TESTS=1`, every
+  window and popup is also drawn into `artifacts\qa`.
+
 To test exactly like CI does (the Release build is what ships; these are the commands in
 `.github/workflows/ci.yml`):
 
@@ -53,7 +58,7 @@ dotnet test BlindsDown.slnx -c Release --no-build --filter "FullyQualifiedName!~
 Package versions are pinned exactly in the project files and Dependabot proposes updates. There are no NuGet
 lock files: they broke on every .NET patch release because of a package the SDK adds by itself.
 
-## Manual test checklist (Stage 1)
+## Manual test checklist (microphones)
 
 Do this before every release, on a real PC, with the exe you are about to release
 (`dotnet publish src/BlindsDown/BlindsDown.csproj -c Release -r win-x64 -o publish/win-x64`).
@@ -82,8 +87,9 @@ Expected results are written after the arrow (→). Tick each box when it passes
 - [ ] **1. First run.** Start `BlindsDown.exe` with no `%LocalAppData%\BlindsDown` folder.
   → A welcome window explains what BlindsDown does, shows the hotkey (Ctrl+Alt+Shift+M), says it never
   connects to the internet, and explains pinning the tray icon. The pin button opens Settings >
-  Personalization > Taskbar. "Start with Windows" can be ticked. After closing it, the BlindsDown icon is in
-  the tray (or under the **^** arrow). Starting `BlindsDown.exe` a second time does not open a second copy.
+  Personalization > Taskbar. "Start BlindsDown when I sign in to Windows" can be ticked. After closing it, the
+  BlindsDown icon is in the tray (or under the **^** arrow). Starting `BlindsDown.exe` a second time does not
+  open a second copy.
 - [ ] **2. Hotkey toggles.** Click into Notepad and press Ctrl+Alt+Shift+M.
   → Falling tone, a big "Microphones locked" message in the middle of the screen, red "MIC LOCKED" badge,
   tray icon changes shape (blinds down) and colour. In `mmsys.cpl` > Recording every microphone shows muted
@@ -116,8 +122,8 @@ Expected results are written after the arrow (→). Tick each box when it passes
 - [ ] **9. Unmute while locked.** Lock. In `mmsys.cpl` > Recording > a mic > Levels, click the speaker icon to
   unmute it. → Within about a second it is muted again, and a red alert popup says it was re-muted (it stays
   until closed). Unmute it 5 or more times within a minute → it is re-muted **every** time (BlindsDown never
-  gives up), and a red "Something keeps unmuting..." popup appears and stays until closed. Further unmutes
-  update that one popup instead of stacking new ones.
+  gives up), and a red "Something keeps undoing the microphone lock" popup ("Something keeps unmuting ...")
+  appears and stays until closed. Further unmutes update that one popup instead of stacking new ones.
 - [ ] **10. Plug in a new mic while locked.** Lock. Plug in a USB mic or webcam. → Within a second its
   microphone appears in `mmsys.cpl` already muted, with an alert naming it. Unlock → it goes back to how it
   arrived (normally unmuted) and the restore report mentions it.
@@ -155,8 +161,9 @@ Expected results are written after the arrow (→). Tick each box when it passes
   the unplugged mic could not be restored yet and offers to keep running until it is plugged back in.
   Choose to keep running and plug the mic back in → it is restored. (If you let BlindsDown close instead,
   the mic is only restored the next time BlindsDown runs while it is plugged in.)
-- [ ] **17. Reboot while locked.** With "Start with Windows" on, lock, then restart Windows. → After signing in,
-  BlindsDown starts by itself, the badge shows locked, all mics are still muted. Unlock → restored as usual.
+- [ ] **17. Restart while locked.** With "Start BlindsDown when I sign in to Windows" on, lock, then restart
+  Windows. → After signing in, BlindsDown starts by itself, the badge shows locked, all mics are still muted.
+  Unlock → restored as usual.
   - **a.** Task Manager > Startup apps shows BlindsDown. Disable it there, then open BlindsDown Settings. →
   Settings says that start with Windows was turned off in Task Manager and has a button that opens that
   page. Click OK in Settings → Task Manager still shows BlindsDown as disabled (BlindsDown never overrides
@@ -177,10 +184,10 @@ Expected results are written after the arrow (→). Tick each box when it passes
   an app you always allow, and again with "Show a popup when an app starts using a microphone" turned off
   in Settings → a popup still appears every time. Stop and start the same app on the same mic a few times →
   still one popup, updated, not a stack.
-  - **f.** Camera (best effort): unlocked, open the Camera app for about 15 seconds. → Within about 10 to 20
-  seconds a popup says the Camera app is using your camera, and it shows up in Activity. Some newer Windows 11
-  builds no longer update the records this comes from; if no popup ever comes, note the Windows build
-  (Win+R, `winver`).
+  - **f.** Camera: unlocked, open the Camera app. → Within a second or two a popup says the Camera app is using
+  your camera, and it shows up in Activity. If it takes 10 to 20 seconds instead, the live camera monitor isn't
+  available on this Windows and BlindsDown fell back to Windows' usage records (`blindsdown.log` says so); note
+  the Windows build (Win+R, `winver`). Test 44 checks the live monitor in detail.
 - [ ] **19. Always allow.** Click **Always allow** on a popup for an app. → While unlocked, no more popups for that
   app; it still appears in Activity history (while locked it still gets popups: see 18e). Settings > Alerts
   lists it; **Remove** brings its popups back.
@@ -192,10 +199,16 @@ Expected results are written after the arrow (→). Tick each box when it passes
   badge corner, sounds and history retention. Exit and start BlindsDown again. → Every setting is as you
   left it and the new hotkey works. `%LocalAppData%\BlindsDown\settings.json` exists. "Clear history" empties
   the Activity history.
-- [ ] **22. Hotkey after Settings.** Open Settings and click **Cancel**. Press the hotkey → the lock toggles.
-  Press it again to undo. Open Settings and click **OK** without changing anything. Press the hotkey → the
-  lock toggles. Press it again to undo. (While Settings is open, pressing the hotkey in the hotkey box must
-  not toggle the lock.)
+- [ ] **22. Hotkey with and after Settings.** Open Settings and click **Cancel**. Press the hotkey → the lock
+  toggles. Press it again to undo. Open Settings and click **OK** without changing anything. Press the hotkey
+  → the lock toggles. Press it again to undo.
+  - **a.** Open Settings, then click into Notepad so Settings is in the background. Press the hotkey → the lock
+  toggles while Settings stays open. Press it again to undo.
+  - **b.** In Settings, click the hotkey box and press the current hotkey → the box shows that combination and
+  the lock does **not** toggle. Press another combination → the box shows it. Click **Cancel**.
+  - **c.** With a popup that stays on screen (for example the red one from test 9), open Settings, and then
+  About from the tray menu. → The popup's close button and its action buttons still work while either window
+  is open.
 - [ ] **23. Exact restore, checked with snapshots.** This is the gold-standard restore check. Unlocked, run
   `.\BlindsDown.exe --snapshot before.txt`. Lock with the hotkey, then unlock. Run
   `.\BlindsDown.exe --snapshot after.txt`, wait a moment, then run `fc.exe before.txt after.txt` (in
@@ -206,8 +219,10 @@ Expected results are written after the arrow (→). Tick each box when it passes
   Notepad, copy one line, paste it as a new last line, and in that copy change the year in both `"start"` and
   `"end"` to last year. Save. Start BlindsDown. → The copied old entry is gone from `history.jsonl` and does
   not appear in Activity; the other entries are still there. Then turn history off in Settings > History and
-  click OK. → Along the way, BlindsDown asks whether to also delete the history you already have. Choose to
-  keep it → Activity still shows it. Turn history back on.
+  click OK. → BlindsDown says it no longer records which apps use your devices, that locks and unlocks are
+  still recorded in the lock timeline, and asks whether to also delete the history and timeline you already
+  have. Choose to keep it → Activity still shows it. Lock and unlock → the lock timeline shows the new lock,
+  but no new app use is recorded. "Keep entries for" stays editable while history is off. Turn history back on.
 - [ ] **25. Unlocked by another program.** Turn sounds off in Settings. Lock with the hotkey. Run
   `.\BlindsDown.exe --unlock`. → BlindsDown unlocks, the unlock tone plays even though sounds are off, and a
   red "Unlocked by another program" popup appears and stays until you close it. Lock again and run
@@ -226,6 +241,107 @@ Expected results are written after the arrow (→). Tick each box when it passes
   "TCP Connections". In PowerShell, `Get-NetTCPConnection -OwningProcess (Get-Process BlindsDown).Id` and
   `Get-NetUDPEndpoint -OwningProcess (Get-Process BlindsDown).Id` find nothing. No red "networking code
   loaded" alert ever appears.
+
+## Manual test checklist (cameras, helper, stronger microphone lock)
+
+Do these after the microphone list, with a USB webcam you can plug in and out (ideally one with a built-in
+microphone). You need administrator rights for the helper's install and removal. Take
+`.\BlindsDown.exe --snapshot start2.txt` first: it lists microphones **and** cameras.
+
+- [ ] **29. Camera offer.** With the helper not installed and an existing settings file, start BlindsDown. → One
+  "New: lock your cameras too" popup with **Set up**, shown only on this start. Fresh start (no settings folder) →
+  the welcome window has an unchecked "Also lock my cameras" instead.
+- [ ] **30. Install the helper.** Settings > Camera > **Turn on camera lock…** → an explanation, then one Windows
+  administrator prompt. Say **No** → nothing changes and Settings says so. Try again and say **Yes** → after a few
+  seconds Settings > Camera says the camera lock is on, with the helper's version. Check: `services.msc` lists
+  "BlindsDown camera helper" (Automatic, Running); `C:\Program Files\BlindsDown\BlindsDown.exe` exists;
+  Settings > Apps > Installed apps lists "BlindsDown camera helper".
+- [ ] **31. Camera lock.** Open the Windows Camera app (unlocked) → picture. Close it. Lock → the badge says
+  **MIC + CAMERA LOCKED** and the confirmation counts the camera. Open the Camera app → no camera found (or an
+  error). Device Manager > Cameras shows the webcam as disabled. Tray menu > Exit → the question says "Your
+  microphones and cameras are locked." and that the camera helper keeps the cameras off; click **Cancel**.
+  Unlock → the restore report includes the camera, the Camera app shows a picture again, Device Manager shows it
+  enabled.
+- [ ] **32. Camera in use while locking.** Start the Camera app, then lock. → Either the camera turns off and the
+  app loses the picture, or the lock is amber **PARTIALLY LOCKED** with "in use by an app; BlindsDown keeps
+  trying"; then close the Camera app → within a few seconds the lock turns red. Unlock → everything back.
+- [ ] **33. Camera turned back on while locked.** Lock. In Device Manager, right-click the webcam > **Enable
+  device**. → Within a few seconds it is disabled again and a red "Device turned back on while locked" popup
+  appears. Unlock → enabled.
+- [ ] **34. Camera plugged in while locked.** Lock with the webcam unplugged, then plug it in. → It is turned off
+  within a second or two with a "New device locked" popup. Unplug it while still locked, plug it back in → turned
+  off again. Unlock → it works.
+- [ ] **35. Infrared and virtual cameras.** On a PC with Windows Hello face sign-in: lock → face sign-in still
+  works (the IR camera is left alone) and Settings > Devices says so. Tick "Also lock infrared cameras", lock →
+  face sign-in is unavailable until you unlock. Same idea for a virtual camera (OBS, Phone Link) with "Also lock
+  virtual cameras".
+- [ ] **36. Camera exclusion.** Settings > Devices: exclude the webcam. Lock → it stays on and Settings shows it
+  as excluded; using it while locked gives a red "camera you excluded" popup. Remove the exclusion.
+- [ ] **37. Restart while locked (helper).** Lock, then Start > Power > **Restart** (not Shut down: with Fast
+  Startup that keeps the devices as they are). → Before signing in the webcam is already disabled again (Device
+  Manager after sign-in shows it disabled; `%ProgramData%\BlindsDown\helper.log` shows the lock was re-applied).
+  After sign-in BlindsDown says it is still locked. Unlock → everything back.
+- [ ] **38. Helper stopped while locked.** Lock. In `services.msc` stop "BlindsDown camera helper". → Within a few
+  seconds the badge turns amber and Settings > Camera says the helper isn't answering; the webcam stays disabled.
+  Start the service again → red again. Unlock → the webcam is back.
+  - **a.** Lock, stop the service, then unlock. → The microphones unlock; a red popup says the cameras may still
+  be off and does **not** promise that a restart fixes it. The tray menu offers **Lock microphones** (what a click
+  does now) and its status line says the helper isn't answering and may still have the cameras off. Start the
+  service again and wait until Settings > Camera says the helper answers → the tray says only cameras are locked.
+  Unlock (tray click) → the webcam is back.
+- [ ] **39. Unlock command while the app runs.** Lock. In PowerShell (not as administrator) run
+  `.\BlindsDown.exe --restore` from a second copy of BlindsDown while the tray app keeps running → it is handed to
+  the running app as an unlock command: "Unlocked by another program" (tone and red popup) and both microphones
+  and cameras are back.
+  - **a. Cameras unlocked through the helper by another program.** Turn sounds off. Lock. In PowerShell (not as
+  administrator) send the helper an unlock the way any program could:
+    ```powershell
+    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', 'BlindsDown.Helper', [System.IO.Pipes.PipeDirection]::InOut)
+    $pipe.Connect(5000); $pipe.ReadMode = 'Message'
+    $id = [guid]::NewGuid().ToString('N')
+    $request = [Text.Encoding]::UTF8.GetBytes("{`"v`":1,`"command`":`"Unlock`",`"source`":`"manual test`",`"requestId`":`"$id`"}")
+    $pipe.Write($request, 0, $request.Length)
+    $answer = [byte[]]::new(65536); $length = $pipe.Read($answer, 0, $answer.Length); $pipe.Dispose()
+    [Text.Encoding]::UTF8.GetString($answer, 0, $length)
+    ```
+    → Within two seconds: the unlock tone (sounds are off), a red "Unlocked by another program" popup naming the
+    webcam with a **Lock again** button, and the tray status says the cameras aren't locked. Activity's timeline
+    keeps the lock going, marked with a warning. Click **Lock again** → the webcam is off again and the popup closes.
+  - **b. While BlindsDown is closed.** Lock, tray menu > **Exit** > keep locked. Run the snippet above, then start
+  BlindsDown → "Still locked" and a red popup that starts "While BlindsDown wasn't running" with the time of the
+  unlock, saying BlindsDown locked the cameras again; the webcam is off.
+  - **c. Your own changes are never "another program".** Lock and unlock with the hotkey a few times, run
+  `.\BlindsDown.exe --restore` with the tray app closed and then start it, and remove the helper from Settings while
+  locked (first part of step 45) → no "Unlocked by another program" or "Lock changed by another program" popup.
+- [ ] **40. Stronger microphone lock.** Settings > Devices > tick "Turn microphones off in Windows while locked".
+  With a voice app using a physical mic, lock. → In `mmsys.cpl` > Recording (right-click > Show Disabled Devices)
+  every physical mic is **Disabled**; virtual ones (Sonar, Voicemeeter) are only muted; your default microphone
+  is still the default (or, if a mic is excluded, the default mics are only muted and the restore says nothing
+  changed). Unlock → every mic is Ready again, unmuted as before, and the default microphones are the same as
+  before (`--snapshot` before and after: only "Taken:" differs). Untick the option afterwards if you don't want it.
+- [ ] **41. Microphone hardware (helper).** Settings > Camera > tick "Also turn off microphone-only hardware".
+  With the webcam (which has a microphone) plugged in, lock. → Device Manager shows the webcam's audio device
+  disabled; a USB headset with headphones is **not** disabled (only muted). Unlock → the webcam microphone is back
+  and listed in Sound settings, unmuted as before; the defaults are unchanged.
+- [ ] **42. Automatic lock.** Settings > General: tick "Lock when I lock Windows". Press Win+L and sign in again →
+  locked, and Activity's timeline says "automatic". Same for "Lock when the PC goes to sleep" (Start > Power >
+  Sleep, then wake it). Unlocking is never automatic.
+- [ ] **43. Lock timeline.** Activity shows each lock and unlock with time, how (hotkey, tray, other program,
+  automatic, exit, or startup when you chose **Restore my devices** after a crash) and a warning mark when
+  something wasn't exact. Hovering over a row shows the whole story in words (for example "unlocked by another
+  program"). **Clear history** in Settings clears it too.
+- [ ] **44. Live camera usage.** Unlocked, open the Camera app → within a second "Camera is using your camera"
+  (no 10-second delay) naming the webcam; Activity shows it under "Using now".
+- [ ] **45. Remove the helper.** While locked: Settings > Camera > **Remove helper…** → confirmation, one
+  administrator prompt. → The webcam is turned back on first; the service, `C:\Program Files\BlindsDown` (or it is
+  emptied at the next restart), `%ProgramData%\BlindsDown` and the Installed apps entry are gone; Settings > Camera
+  offers **Turn on camera lock** again. Install again, lock, then remove it from Settings > Apps > Installed apps >
+  "BlindsDown camera helper" > Uninstall while BlindsDown runs → same result, and BlindsDown shows a red "Camera
+  helper removed" or "Unlocked by another program" popup (the removal didn't come from it). Install the helper
+  again, lock, choose Exit > **Exit and stay locked**, remove the helper from Installed apps, then start
+  BlindsDown → a red "Camera helper removed" popup that says it happened while BlindsDown wasn't running.
+- [ ] **46. Snapshots match.** With the same devices plugged in as at the start: `.\BlindsDown.exe --snapshot
+  end2.txt`, then `fc.exe start2.txt end2.txt` → only "Taken:" differs.
 
 ### After testing
 

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 
 namespace BlindsDown.Ui.Forms;
@@ -73,7 +74,7 @@ internal static class SeverityGlyph
 /// </summary>
 internal sealed class SeverityGlyphControl : Control
 {
-    private readonly AlertSeverity _severity;
+    private AlertSeverity _severity;
 
     public SeverityGlyphControl(AlertSeverity severity)
     {
@@ -84,6 +85,22 @@ internal sealed class SeverityGlyphControl : Control
         BackColor = Color.Transparent;
         AutoSize = true;
         AccessibleRole = AccessibleRole.Graphic;
+    }
+
+    /// <summary>The badge shown; a status line (e.g. the camera helper's) changes it in place.</summary>
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public AlertSeverity Severity
+    {
+        get => _severity;
+        set
+        {
+            if (_severity != value)
+            {
+                _severity = value;
+                Invalidate();
+            }
+        }
     }
 
     public override Size GetPreferredSize(Size proposedSize)

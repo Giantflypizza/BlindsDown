@@ -8,7 +8,12 @@ namespace BlindsDown.Ui;
 /// "Activity" window: who is using the microphone/camera right now (live, with duration),
 /// and recent history ("Discord used your microphone 14:02–14:47 (45 min) via SteelSeries Sonar").
 /// History rows are merged with <see cref="HistoryStore.MergeShortGaps"/> (15 s), grouped by day, shown
-/// in local time; approximate (backfilled) rows are marked "≈". Per row: "Always allow (no popups)".
+/// in local time; approximate (backfilled) rows are marked "≈". Per row: "Always allow (no popups while unlocked)".
+/// The lock timeline is merged into the same list by time: each lock with its unlock is one row
+/// ("Locked · hotkey / tray", what it covered, "14:02 – 14:47 (45 min)", the whole story as tooltip), in grey,
+/// or red with "⚠" when the lock was partial or the restore not exact. One list reads as one
+/// story (an app that used the microphone right after an unlock shows up right above it), and stays fast with
+/// hundreds of entries: at most <see cref="MaxHistoryRows"/> rows, rebuilt only when the data changed.
 /// Non-modal; the caller keeps one instance and calls <see cref="SetData"/> when things change.
 /// Closing the window only hides it (so its size and position are remembered for the session);
 /// the caller disposes it on exit.
@@ -19,7 +24,9 @@ internal sealed class ActivityForm : Form
 
     /// <summary>In both lists the device column gives up width first when the window is narrow.</summary>
     private const int DeviceColumn = 1;
-    private const string AllowText = "Always allow (no popups)";
+    /// <summary>"Always allow" only quiets popups while unlocked: while locked, every app that opens a locked device
+    /// still gets one.</summary>
+    internal const string AllowText = "Always allow (no popups while unlocked)";
 
     private readonly Font _font;
     private readonly ListView _nowList = NewList();
@@ -35,14 +42,15 @@ internal sealed class ActivityForm : Form
 
     private IReadOnlyList<UsageSession> _active = [];
     private IReadOnlyList<UsageRecord> _history = [];
+    private IReadOnlyList<LockEventRecord> _lockEvents = [];
     private string _historySignature = string.Empty;
     private DateOnly _historyDay;
 
     public ActivityForm()
     {
         _font = Theme.BodyFont;
-        _nowEmpty = DialogLayout.Hint("Nothing is using your microphone right now.", new Padding(0, 2, 0, 12));
-        _historyEmpty = DialogLayout.Hint("No activity yet. When an app uses your microphone, it shows up here.", new Padding(0, 2, 0, 8));
+        _nowEmpty = DialogLayout.Hint("Nothing is using a microphone or camera right now.", new Padding(0, 2, 0, 12));
+        _historyEmpty = DialogLayout.Hint("No activity yet. When an app uses your microphone or camera, or when you lock, it shows up here.", new Padding(0, 2, 0, 8));
         _legend = DialogLayout.Hint(string.Empty, new Padding(0, 4, 0, 0));
         _status = DialogLayout.Hint(string.Empty, Padding.Empty);
         _status.Dock = DockStyle.None;
@@ -125,11 +133,19 @@ internal sealed class ActivityForm : Form
     /// <summary>The user asked to stop popups for this app (history still records it).</summary>
     public event Action<AppIdentity>? AllowAppRequested;
 
-    public void SetData(IReadOnlyList<UsageSession> active, IReadOnlyList<UsageRecord> history)
+    /// <summary>Shows the data. <paramref name="lockEvents"/>: locks and unlocks (any order; the log gives them
+    /// newest first) for the timeline, paired into periods such as "Locked · hotkey / tray 14:02 – 14:47".
+    /// Null keeps the ones given before.</summary>
+    public void SetData(IReadOnlyList<UsageSession> active, IReadOnlyList<UsageRecord> history, IReadOnlyList<LockEventRecord>? lockEvents = null)
     {
         // Copies: the window keeps these to re-render every second, and the caller's lists may change.
         _active = [.. active];
         _history = [.. history];
+        if (lockEvents is not null)
+        {
+            _lockEvents = [.. lockEvents];
+        }
+
         RenderActive();
         RenderHistory(force: false);
     }
@@ -233,7 +249,7 @@ internal sealed class ActivityForm : Form
     private void RenderHistory(bool force)
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        string signature = HistorySignature(_history);
+        string signature = HistorySignature(_history, _lockEvents);
         if (!force && signature == _historySignature)
         {
             return;
@@ -241,9 +257,9 @@ internal sealed class ActivityForm : Form
 
         _historySignature = signature;
         _historyDay = ActivityText.LocalDay(now, Zone);
-        List<HistoryDay> days = ActivityText.GroupByDay(_history, Zone, now, Culture);
+        List<HistoryDay> days = ActivityText.GroupByDay(_history, Zone, now, Culture, LockTimeline.Pair(_lockEvents));
         object? top = _historyList.TopItem?.Tag;
-        UsageRecord? selected = _historyList.SelectedItems.Count > 0 ? _historyList.SelectedItems[0].Tag as UsageRecord : null;
+        object? selected = _historyList.SelectedItems.Count > 0 ? _historyList.SelectedItems[0].Tag : null;
 
         // Native group headers keep the light theme's dark blue in dark mode (unreadable), so there the
         // days are plain header rows in the accent colour instead.
@@ -254,6 +270,7 @@ internal sealed class ActivityForm : Form
         _historyList.ShowGroups = nativeGroups;
         int rows = 0;
         bool approximate = false;
+        bool problems = false;
         foreach (HistoryDay day in days)
         {
             if (rows >= MaxHistoryRows)
@@ -272,18 +289,13 @@ internal sealed class ActivityForm : Form
                 _historyList.Items.Add(new ListViewItem(day.Label) { ForeColor = UiPalette.Accent });
             }
 
-            foreach (UsageRecord record in day.Records.Take(MaxHistoryRows - rows))
+            foreach (ActivityEntry entry in day.Entries.Take(MaxHistoryRows - rows))
             {
-                var item = new ListViewItem(ActivityText.App(record.AppName, record.ViaApp), group)
-                {
-                    Tag = record,
-                    ToolTipText = ActivityText.Sentence(record, Zone, Culture),
-                };
-                item.SubItems.Add(ActivityText.Device(record.Kind, record.DeviceName));
-                item.SubItems.Add(ActivityText.Range(record, Zone, Culture));
-                item.Selected = record.Equals(selected);
+                ListViewItem item = entry.Record is UsageRecord record ? UsageItem(record, group) : LockItem(entry.Lock!, group);
+                item.Selected = item.Tag is not null && item.Tag.Equals(selected);
                 _historyList.Items.Add(item);
-                approximate |= record.Approximate;
+                approximate |= entry.Record?.Approximate == true;
+                problems |= entry.Lock?.HadProblems == true;
                 rows++;
             }
         }
@@ -299,6 +311,11 @@ internal sealed class ActivityForm : Form
             legend.Add(ActivityText.ApproximateMark + " Approximate times, taken from Windows' own usage records.");
         }
 
+        if (problems)
+        {
+            legend.Add(LockTimeline.ProblemMark + " The lock was partial, or unlocking couldn't restore everything exactly. Point at the row for details.");
+        }
+
         if (rows >= MaxHistoryRows)
         {
             legend.Add("Showing the latest " + MaxHistoryRows.ToString("N0", Culture) + " entries.");
@@ -308,6 +325,35 @@ internal sealed class ActivityForm : Form
         _legend.Visible = legend.Count > 0;
         ListViews.FitColumns(_historyList, DeviceColumn);
         UpdateAllowButton();
+    }
+
+    private static ListViewItem UsageItem(UsageRecord record, ListViewGroup? group)
+    {
+        var item = new ListViewItem(ActivityText.App(record.AppName, record.ViaApp), group)
+        {
+            Tag = record,
+            ToolTipText = ActivityText.Sentence(record, Zone, Culture),
+        };
+        item.SubItems.Add(ActivityText.Device(record.Kind, record.DeviceName));
+        item.SubItems.Add(ActivityText.Range(record, Zone, Culture));
+        return item;
+    }
+
+    /// <summary>
+    /// A lock period: grey, like a marker on the timeline, so the apps (what the list is mainly about) stay in
+    /// front; red when something went wrong. (The navy accent is too close to black on a light list to tell apart.)
+    /// </summary>
+    private static ListViewItem LockItem(LockPeriod period, ListViewGroup? group)
+    {
+        var item = new ListViewItem(LockTimeline.Title(period), group)
+        {
+            Tag = period,
+            ToolTipText = LockTimeline.Sentence(period, Zone, Culture),
+            ForeColor = period.HadProblems ? UiPalette.ErrorText : SystemColors.GrayText,
+        };
+        item.SubItems.Add(LockTimeline.Devices(period));
+        item.SubItems.Add(LockTimeline.Range(period, Zone, Culture));
+        return item;
     }
 
     private void RestoreTopItem(object? tag)
@@ -341,7 +387,7 @@ internal sealed class ActivityForm : Form
         AppIdentity? identity = SelectedIdentity();
         _allowButton.Enabled = identity is not null;
         // "&" would turn into a menu mnemonic.
-        _allowMenuItem.Text = identity is null ? AllowText : $"Always allow {identity.DisplayName.Replace("&", "&&", StringComparison.Ordinal)} (no popups)";
+        _allowMenuItem.Text = identity is null ? AllowText : $"Always allow {identity.DisplayName.Replace("&", "&&", StringComparison.Ordinal)} (no popups while unlocked)";
     }
 
     private AppIdentity? SelectedIdentity()
@@ -372,10 +418,16 @@ internal sealed class ActivityForm : Form
         _status.Text = $"{identity.DisplayName} won't show popups any more.";
     }
 
-    private static string HistorySignature(IReadOnlyList<UsageRecord> history) =>
-        history.Count == 0
+    private static string HistorySignature(IReadOnlyList<UsageRecord> history, IReadOnlyList<LockEventRecord> lockEvents)
+    {
+        string uses = history.Count == 0
             ? "0"
             : string.Create(CultureInfo.InvariantCulture, $"{history.Count}|{history.Max(r => r.Start).UtcTicks}|{history.Max(r => r.End).UtcTicks}");
+        string locks = lockEvents.Count == 0
+            ? "0"
+            : string.Create(CultureInfo.InvariantCulture, $"{lockEvents.Count}|{lockEvents.Max(e => e.At).UtcTicks}");
+        return uses + "/" + locks;
+    }
 
     private static ListView NewList()
     {

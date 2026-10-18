@@ -166,6 +166,178 @@ public sealed class RestoreReportTests
         Assert.DoesNotContain("..", report.Lines[0].Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false, null, "Turned back on and unmuted, as before the lock.")]
+    [InlineData(true, null, "Turned back on and left muted, as before the lock.")]
+    [InlineData(false, "It was on already; nothing to turn back on.", "Unmuted, as before the lock.")]
+    public void MicThatWasMutedAndTurnedOffHasOneLine(bool wasMuted, string? turnOffNote, string expected)
+    {
+        LockAction turnOff = TurnOff("a", ActionStatus.Reverted);
+        turnOff.Note = turnOffNote;
+
+        RestoreReport report = RestoreReport.Build(Journal(Action("a", ActionStatus.Reverted, wasMuted), turnOff), After(Mic("a", wasMuted)));
+
+        RestoreLine line = Assert.Single(report.Lines);
+        Assert.Equal(RestoreOutcome.Exact, line.Outcome);
+        Assert.Equal(expected, line.Message);
+        Assert.Equal("Microphone (a)", line.DeviceName);
+        Assert.Equal(1, report.DeviceCount);
+        Assert.Equal("1 microphone restored exactly as before.", report.Summary);
+    }
+
+    [Fact]
+    public void DeviceCountCountsMicrophonesNotChanges()
+    {
+        LockJournal journal = Journal(
+            Action("a", ActionStatus.Reverted, false),
+            Action("b", ActionStatus.Reverted, false),
+            TurnOff("a", ActionStatus.Reverted),
+            TurnOff("b", ActionStatus.Reverted));
+
+        RestoreReport report = RestoreReport.Build(journal, After(Mic("a", false), Mic("b", false)));
+
+        Assert.Equal(2, report.DeviceCount);
+        Assert.Equal(["Microphone (a)", "Microphone (b)"], report.Lines.Select(l => l.DeviceName));
+        Assert.Equal("All 2 microphones restored exactly as before.", report.Summary);
+    }
+
+    [Fact]
+    public void FailedTurnOnNeedsAttentionWhateverTheMute()
+    {
+        LockAction turnOff = TurnOff("a", ActionStatus.RevertFailed);
+        turnOff.Note = "Access is denied.";
+
+        RestoreReport report = RestoreReport.Build(
+            Journal(Action("a", ActionStatus.RevertPending, false), turnOff),
+            After(Mic("a", null, EndpointState.Disabled)));
+
+        RestoreLine line = Assert.Single(report.Lines);
+        Assert.Equal(RestoreOutcome.Failed, line.Outcome);
+        Assert.Equal("Could not be turned back on: Access is denied. Turn it on in Windows Sound settings.", line.Message);
+        Assert.Equal("1 needs attention.", report.Summary);
+    }
+
+    [Theory]
+    [InlineData(ActionStatus.RevertPending, false, "Not connected right now. It will be turned back on and unmuted when it is plugged back in.")]
+    [InlineData(ActionStatus.Reverted, true, "Not connected right now. It will be turned back on when it is plugged back in.")]
+    public void MicAwayAtUnlockIsPendingForBoth(ActionStatus mute, bool wasMuted, string expected)
+    {
+        RestoreReport report = RestoreReport.Build(
+            Journal(Action("usb", mute, wasMuted), TurnOff("usb", ActionStatus.RevertPending)),
+            After(Mic("usb", null, EndpointState.NotPresent)));
+
+        RestoreLine line = Assert.Single(report.Lines);
+        Assert.Equal(RestoreOutcome.Pending, line.Outcome);
+        Assert.Equal(expected, line.Message);
+        Assert.Equal(1, report.PendingCount);
+    }
+
+    [Fact]
+    public void MicTurnedBackOnButAwayIsPendingForTheUnmute()
+    {
+        RestoreReport report = RestoreReport.Build(
+            Journal(Action("hfp", ActionStatus.RevertPending, false), TurnOff("hfp", ActionStatus.Reverted)),
+            After(Mic("hfp", null, EndpointState.Unplugged)));
+
+        RestoreLine line = Assert.Single(report.Lines);
+        Assert.Equal(RestoreOutcome.Pending, line.Outcome);
+        Assert.Equal("Turned back on, but not connected right now. It will be unmuted when it is plugged back in.", line.Message);
+    }
+
+    [Fact]
+    public void MicTurnedBackOnButNotUnmutedSaysBoth()
+    {
+        LockAction mute = Action("a", ActionStatus.RevertFailed, false);
+        mute.Note = "Unmute did not take effect";
+
+        RestoreReport report = RestoreReport.Build(Journal(mute, TurnOff("a", ActionStatus.Reverted)), After(Mic("a", true)));
+
+        RestoreLine line = Assert.Single(report.Lines);
+        Assert.Equal(RestoreOutcome.Failed, line.Outcome);
+        Assert.Equal("Turned back on, but could not be unmuted: Unmute did not take effect. Unmute it in Windows Sound settings.", line.Message);
+    }
+
+    [Fact]
+    public void DefaultsSetBackByTheUnlockAreNotMentioned()
+    {
+        LockJournal journal = Journal(Action("a", ActionStatus.Reverted, false), TurnOff("a", ActionStatus.Reverted));
+        journal.Before = new AudioSnapshot([Mic("a", false)], new DefaultMics("a", "a", "a"), Now);
+        journal.DefaultsWhileLocked = new DefaultMics("v", "v", "v");
+
+        RestoreReport report = RestoreReport.Build(journal, new AudioSnapshot([Mic("a", false)], new DefaultMics("a", "a", "a"), Now));
+
+        Assert.True(report.AllExact, report.Summary);
+        Assert.Single(report.Lines);
+    }
+
+    [Fact]
+    public void TurnOffWithoutAMuteEntryStillGetsALine()
+    {
+        // Only a damaged or hand-edited journal has one; the report must not trip over it.
+        RestoreReport report = RestoreReport.Build(Journal(TurnOff("a", ActionStatus.Reverted)), After(Mic("a", false)));
+
+        Assert.Equal("Turned back on, as before the lock.", Assert.Single(report.Lines).Message);
+        Assert.Equal(1, report.DeviceCount);
+    }
+
+    [Fact]
+    public void MultimediaDefaultThatChangedOnItsOwnGetsItsOwnLine()
+    {
+        LockJournal journal = Journal(Action("a", ActionStatus.Reverted, false), Action("b", ActionStatus.Reverted, false));
+        journal.Before = new AudioSnapshot([Mic("a", false), Mic("b", false)], new DefaultMics("a", "a", "a"), Now);
+
+        RestoreReport report = RestoreReport.Build(
+            journal,
+            new AudioSnapshot([Mic("a", false), Mic("b", false)], new DefaultMics("a", "b", "a"), Now));
+
+        RestoreLine line = Assert.Single(report.Lines, l => l.Outcome == RestoreOutcome.DefaultChanged);
+        Assert.Equal("The default multimedia microphone changed from \"Microphone (a)\" to \"Microphone (b)\".", line.Message);
+    }
+
+    [Fact]
+    public void ConsoleAndMultimediaDefaultsThatChangedTogetherGetOneLine()
+    {
+        LockJournal journal = Journal(Action("a", ActionStatus.Reverted, false), Action("b", ActionStatus.Reverted, false));
+        journal.Before = new AudioSnapshot([Mic("a", false), Mic("b", false)], new DefaultMics("a", "a", "a"), Now);
+
+        RestoreReport report = RestoreReport.Build(
+            journal,
+            new AudioSnapshot([Mic("a", false), Mic("b", false)], new DefaultMics("b", "b", "a"), Now));
+
+        RestoreLine line = Assert.Single(report.Lines, l => l.Outcome == RestoreOutcome.DefaultChanged);
+        Assert.Equal("The default microphone changed from \"Microphone (a)\" to \"Microphone (b)\".", line.Message);
+    }
+
+    [Fact]
+    public void MicSomeoneTurnedOffDuringTheLockIsNotCalledUnplugged()
+    {
+        // Muted by the lock, then turned off in Sound settings: it can't be unmuted until it is turned back on.
+        RestoreReport owed = RestoreReport.Build(
+            Journal(Action("a", ActionStatus.RevertPending, false)),
+            After(Mic("a", null, EndpointState.Disabled)));
+
+        RestoreLine pending = Assert.Single(owed.Lines);
+        Assert.Equal(RestoreOutcome.Pending, pending.Outcome);
+        Assert.Equal("Turned off in Windows right now (not by BlindsDown). It will be unmuted when it is turned back on.", pending.Message);
+
+        // Already muted before the lock, so nothing is owed, but it was on and isn't now.
+        RestoreReport changed = RestoreReport.Build(
+            Journal(Action("b", ActionStatus.Reverted, true), TurnOff("b", ActionStatus.Reverted)),
+            After(Mic("b", null, EndpointState.Disabled)));
+
+        RestoreLine line = Assert.Single(changed.Lines);
+        Assert.Equal(RestoreOutcome.ChangedByOthers, line.Outcome);
+        Assert.Equal("Was on before the lock but is turned off in Windows now (changed by another app or by you).", line.Message);
+    }
+
+    private static LockAction TurnOff(string id, ActionStatus status) => new()
+    {
+        Kind = ActionKind.DisableMicEndpoint,
+        TargetId = id,
+        DisplayName = $"Microphone ({id})",
+        Status = status,
+    };
+
     private static LockJournal Journal(params LockAction[] actions) => new()
     {
         LockId = Guid.NewGuid(),

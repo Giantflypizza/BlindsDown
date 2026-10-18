@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using System.Reflection.Emit;
 using System.Reflection.Metadata;
 using System.Text.Json;
 
@@ -16,14 +17,15 @@ namespace BlindsDown.Tests.NoNetwork;
 internal static class NoNetworkPolicy
 {
     /// <summary>
-    /// The only native DLLs BlindsDown may P/Invoke into. None of them is a networking library
-    /// (ws2_32, winhttp, wininet, urlmon, dnsapi, iphlpapi, netapi32, ... are all absent).
+    /// The only native DLLs BlindsDown may P/Invoke into: exactly the ones it uses. None of them is a networking
+    /// library (ws2_32, winhttp, wininet, urlmon, dnsapi, iphlpapi, netapi32, mpr, ... are all absent). A DLL is
+    /// added here only together with the code that needs it, after checking what else it exports (setupapi, for
+    /// example, has SetupDi*Ex functions that take another computer's name).
     /// </summary>
     public static readonly FrozenSet<string> AllowedNativeLibraries = new[]
     {
-        "user32", "kernel32", "advapi32", "shell32", "shlwapi", "shcore", "ole32", "oleaut32", "combase",
-        "propsys", "cfgmgr32", "setupapi", "ntdll", "mfplat", "mfsensorgroup", "dwmapi", "uxtheme", "gdi32",
-        "winmm", "comctl32", "wtsapi32",
+        "user32", "kernel32", "advapi32", "shell32", "shlwapi", "shcore", "ole32", "cfgmgr32", "ntdll", "mfplat",
+        "mfsensorgroup", "dwmapi", "gdi32", "winmm",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The only COM classes BlindsDown may create. A COM class can be anything (WinHTTP, MSXML,
@@ -57,6 +59,14 @@ internal static class NoNetworkPolicy
     private const string ByName = "calls a member chosen by name at run time, which this scan can't check (e.g. Process.Start found with GetMethod); call it directly";
     private const string RemoteMachine = "the machine-name parameter connects to another computer over the network; use the overload without it";
     private const string OtherProcess = "runs code inside another process, which may be one that has network access";
+    private const string FileDialog = "the shell's file dialogs browse network locations";
+    private const string HelpFile = "a help file path can be a URL, which the help viewer opens";
+
+    /// <summary>The parameters of MessageBox.Show up to and including its help file path (the overloads with an owner window have one more in front).</summary>
+    private const string MessageBoxWithHelp = "System.String,System.String,System.Windows.Forms.MessageBoxButtons,System.Windows.Forms.MessageBoxIcon,"
+        + "System.Windows.Forms.MessageBoxDefaultButton,System.Windows.Forms.MessageBoxOptions,System.String";
+
+    private const string Owner = "System.Windows.Forms.IWin32Window,";
 
     /// <summary>
     /// Whole namespaces that are side doors around the narrower rules: they reach banned functionality
@@ -90,6 +100,14 @@ internal static class NoNetworkPolicy
         // Windows builds the chain with CertGetCertificateChain, which downloads missing issuer certificates
         // and revocation lists (AIA, CRL, OCSP) from the URLs written in the certificate.
         ["System.Security.Cryptography.X509Certificates.X509Chain"] = "building a certificate chain downloads certificates and revocation lists from the internet",
+
+        // Also banned in BannedSymbols.txt. Repeated here because "#pragma warning disable RS0030" switches the
+        // analyzer off, and this scan reads the compiled program, which no pragma reaches.
+        ["System.IO.Pipes.NamedPipeClientStream"] = @"connects to named pipes on other computers (\\server\pipe\name); the helper client opens only the local pipe, natively",
+        ["System.Windows.Forms.FileDialog"] = FileDialog,
+        ["System.Windows.Forms.OpenFileDialog"] = FileDialog,
+        ["System.Windows.Forms.SaveFileDialog"] = FileDialog,
+        ["System.Windows.Forms.FolderBrowserDialog"] = FileDialog,
     }.ToFrozenDictionary();
 
     /// <summary>Single members that can reach the network, start other code, or load or call code this scan can't see.</summary>
@@ -179,6 +197,16 @@ internal static class NoNetworkPolicy
         new("System.Diagnostics.EventLog", "CreateEventSource", RemoteMachine, Parameters: "System.String,System.String,System.String"),
         new("System.Diagnostics.EventLog", "set_MachineName", RemoteMachine),
         new("System.Diagnostics.EventSourceCreationData", "set_MachineName", RemoteMachine),
+
+        // The overloads with a help file path (BannedSymbols.txt lists the same ones).
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: MessageBoxWithHelp),
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: MessageBoxWithHelp + ",System.Windows.Forms.HelpNavigator"),
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: MessageBoxWithHelp + ",System.String"),
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: MessageBoxWithHelp + ",System.Windows.Forms.HelpNavigator,System.Object"),
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: Owner + MessageBoxWithHelp),
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: Owner + MessageBoxWithHelp + ",System.Windows.Forms.HelpNavigator"),
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: Owner + MessageBoxWithHelp + ",System.String"),
+        new("System.Windows.Forms.MessageBox", "Show", HelpFile, Parameters: Owner + MessageBoxWithHelp + ",System.Windows.Forms.HelpNavigator,System.Object"),
     ];
 
     /// <summary>
@@ -191,6 +219,41 @@ internal static class NoNetworkPolicy
         "ShellExecute", "ShellExecuteEx", "ShellExec_RunDLL", "CreateProcess", "CreateProcessAsUser", "CreateProcessWithLogon",
         "CreateProcessWithToken", "CreateProcessInternal", "WinExec", "LoadModule", "WinHelp", "NtCreateUserProcess",
         "RtlCreateUserProcess", "NtCreateProcess", "NtCreateProcessEx",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Native functions that make Windows start a program later: registering or changing a service's command line
+    /// (or the command it runs when the service fails), and starting a service. Rule (h) lets only the helper's
+    /// service code reach them, which registers BlindsDown.exe --service and nothing else.
+    /// </summary>
+    private static readonly FrozenSet<string> NativeServiceStarters = new[]
+    {
+        "CreateService", "ChangeServiceConfig", "ChangeServiceConfig2", "StartService",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Native functions whose FIRST parameter names the computer to work on, where null means this one. Rule (i)
+    /// accepts only a constant null there, read from the IL. They are the native form of the managed machine-name
+    /// overloads banned above.
+    /// </summary>
+    private static readonly FrozenSet<string> NativeMachineNameFunctions = new[]
+    {
+        "OpenSCManager", "OpenEventLog", "OpenBackupEventLog", "RegisterEventSource", "LookupPrivilegeValue", "LookupPrivilegeName",
+        "LookupPrivilegeDisplayName", "LookupAccountName", "LookupAccountSid", "LsaOpenPolicy", "InitiateSystemShutdown",
+        "InitiateSystemShutdownEx", "InitiateShutdown", "AbortSystemShutdown",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Native functions that open a file or pipe by path. A path can be \\server\pipe\name or \\server\share\file,
+    /// which Windows opens on another computer (SMB), so rule (j) lets only the helper client reach them, for the
+    /// helper's local pipe (\\.\pipe\...). Plain .NET file APIs call CreateFileW inside the runtime, where no scan
+    /// can see the path; BlindsDown passes them paths it builds from known local folders, or the file name a user
+    /// types after --snapshot or --selftest.
+    /// </summary>
+    private static readonly FrozenSet<string> NativePathOpeners = new[]
+    {
+        "CreateFile", "CreateFile2", "CreateFile3", "CreateFileTransacted", "OpenFile", "WaitNamedPipe", "CallNamedPipe",
+        "NtCreateFile", "NtOpenFile", "ZwCreateFile", "ZwOpenFile",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -277,7 +340,7 @@ internal static class NoNetworkPolicy
     public static IEnumerable<string> BannedNamespaces(AssemblyScanner assembly) =>
         assembly.TypeReferences().Select(t => (Type: t, Verb: "uses"))
             .Concat(assembly.TypeDefinitions().Select(t => (Type: t, Verb: "defines")))
-            .Where(x => BannedNamespacePrefixes.Any(p => x.Type.Namespace.StartsWith(p, StringComparison.Ordinal)))
+            .Where(x => IsNetworkingNamespace(x.Type.Namespace))
             .Select(x => $"{assembly.FileName}: {x.Verb} {x.Type.FullName}");
 
     /// <summary>(c) No type or member that can fetch URLs, open a browser, or load or call code this scan can't see.</summary>
@@ -333,6 +396,23 @@ internal static class NoNetworkPolicy
     /// <summary>True for native functions that start programs: rule (f) lets only SafeShell reach them.</summary>
     public static bool IsNativeProcessStarter(string entryPoint) => TryMatchEntryPoint(NativeProcessStarters, entryPoint, out _);
 
+    /// <summary>True for native functions that register or start a service: rule (h) lets only the helper's service code reach them.</summary>
+    public static bool IsNativeServiceStarter(string entryPoint) => TryMatchEntryPoint(NativeServiceStarters, entryPoint, out _);
+
+    /// <summary>True for native functions whose first parameter is a computer name: rule (i) accepts only a constant null there.</summary>
+    public static bool TakesMachineName(string entryPoint) => TryMatchEntryPoint(NativeMachineNameFunctions, entryPoint, out _);
+
+    /// <summary>True for native functions that open a file or pipe by path: rule (j) lets only the helper client reach them.</summary>
+    public static bool IsNativePathOpener(string entryPoint) => TryMatchEntryPoint(NativePathOpeners, entryPoint, out _);
+
+    /// <summary>True for System.Diagnostics.Process.Start (any overload, static or instance): rule (f) lets only SafeShell call it.</summary>
+    public static bool IsProcessStart(ScannedMember member) =>
+        member.DeclaringType == "System.Diagnostics.Process" && member.Name == "Start";
+
+    /// <summary>True for a networking namespace or one of its children (rule b).</summary>
+    public static bool IsNetworkingNamespace(string ns) =>
+        BannedNamespacePrefixes.Any(p => ns.StartsWith(p, StringComparison.Ordinal));
+
     /// <summary>(d) Every P/Invoke (DllImport, or the stub LibraryImport generates) targets an allowlisted system DLL.</summary>
     public static IEnumerable<string> DisallowedNativeLibraries(AssemblyScanner assembly) =>
         assembly.PInvokes()
@@ -375,33 +455,11 @@ internal static class NoNetworkPolicy
     /// overload, static or instance), and every caller of a native process-starting function, must be
     /// code of that type (including its lambdas and nested types).
     /// </summary>
-    public static IEnumerable<string> ProcessStartsOutside(AssemblyScanner assembly, string allowedType)
-    {
-        IReadOnlyList<CallSite> sites = assembly.CallSites();
-        foreach (CallSite site in sites)
-        {
-            if (site.Callee.DeclaringType == "System.Diagnostics.Process" && site.Callee.Name == "Start" && !site.Caller.IsInType(allowedType))
-            {
-                yield return $"{assembly.FileName}: {site.Caller} calls {site.Callee} ({site.Instruction})";
-            }
-        }
-
-        foreach (PInvokeImport p in assembly.PInvokes())
-        {
-            if (!IsNativeProcessStarter(p.EntryPoint))
-            {
-                continue;
-            }
-
-            foreach (CallSite site in EffectiveCallers(assembly, p))
-            {
-                if (!site.Caller.IsInType(allowedType))
-                {
-                    yield return $"{assembly.FileName}: {site.Caller} calls native {p.Module}!{p.EntryPoint} ({site.Instruction})";
-                }
-            }
-        }
-    }
+    public static IEnumerable<string> ProcessStartsOutside(AssemblyScanner assembly, string allowedType) =>
+        assembly.CallSites()
+            .Where(site => IsProcessStart(site.Callee) && !site.Caller.IsInType(allowedType))
+            .Select(site => $"{assembly.FileName}: {site.Caller} calls {site.Callee} ({site.Instruction})")
+            .Concat(NativeCallsOutside(assembly, IsNativeProcessStarter, allowedType));
 
     /// <summary>
     /// The code that really calls a P/Invoke. LibraryImport compiles into an inner P/Invoke stub plus a
@@ -508,6 +566,214 @@ internal static class NoNetworkPolicy
             string.Equals(n, entryPoint, StringComparison.OrdinalIgnoreCase)
             || string.Equals(n, withoutSuffix, StringComparison.OrdinalIgnoreCase));
         return matched is not null;
+    }
+
+    /// <summary>
+    /// (h) Windows services are registered, reconfigured and started only from <paramref name="allowedType"/> (the
+    /// helper's service code). Windows runs a service's registered command line as LocalSystem, so these calls start
+    /// programs just like Process.Start: CreateService, ChangeServiceConfig and ChangeServiceConfig2 (which also sets
+    /// the command run when a service fails), StartService, and System.ServiceProcess.ServiceController.Start.
+    /// </summary>
+    public static IEnumerable<string> ServiceStartsOutside(AssemblyScanner assembly, string allowedType) =>
+        assembly.CallSites()
+            .Where(site => site.Callee.DeclaringType == "System.ServiceProcess.ServiceController" && site.Callee.Name == "Start"
+                && !site.Caller.IsInType(allowedType))
+            .Select(site => $"{assembly.FileName}: {site.Caller} calls {site.Callee} ({site.Instruction})")
+            .Concat(NativeCallsOutside(assembly, IsNativeServiceStarter, allowedType));
+
+    /// <summary>
+    /// (i) Native functions that take a computer name (OpenSCManagerW and the like) are always called with a constant
+    /// null there, which means this computer. Checked on the IL of every call: a name that comes from a variable or a
+    /// branch, or a function pointer taken to call later, can't be proven null and fails.
+    /// </summary>
+    public static IEnumerable<string> RemoteMachineCalls(AssemblyScanner assembly)
+    {
+        foreach (PInvokeImport p in assembly.PInvokes())
+        {
+            if (!TakesMachineName(p.EntryPoint))
+            {
+                continue;
+            }
+
+            foreach (CallSite site in EffectiveCallers(assembly, p))
+            {
+                if (!PassesConstantNull(assembly, site, 0))
+                {
+                    yield return $"{assembly.FileName}: {site.Caller} calls native {p.Module}!{p.EntryPoint} without a constant null "
+                        + $"machine name ({site.Instruction} at IL_{site.ILOffset:x4}) - {RemoteMachine}";
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// (j) Native functions that open a file or pipe by path (CreateFileW, WaitNamedPipeW, ...) are called only from
+    /// <paramref name="allowedType"/> (the helper client), because a path can name another computer.
+    /// </summary>
+    public static IEnumerable<string> PathOpenersOutside(AssemblyScanner assembly, string allowedType) =>
+        NativeCallsOutside(assembly, IsNativePathOpener, allowedType);
+
+    /// <summary>
+    /// (k) A field that must stay null is only ever written with a constant null. Used for the command in the helper
+    /// service's SERVICE_FAILURE_ACTIONS, which Windows would run as LocalSystem when the service fails. Taking the
+    /// field's address (ldflda) counts as a write, because anything can be stored through it.
+    /// </summary>
+    public static IEnumerable<string> NonNullFieldWrites(AssemblyScanner assembly, string declaringType, string fieldName)
+    {
+        foreach (MethodDefinitionHandle method in assembly.Metadata.MethodDefinitions)
+        {
+            foreach (ILInstruction instruction in assembly.Instructions(method))
+            {
+                if (instruction.OpCode.OperandType != OperandType.InlineField)
+                {
+                    continue;
+                }
+
+                ScannedMember field = assembly.DescribeField(instruction.Token);
+                if (field.DeclaringType != declaringType || field.Name != fieldName)
+                {
+                    continue;
+                }
+
+                OpCode op = instruction.OpCode;
+                if (op == OpCodes.Ldflda || op == OpCodes.Ldsflda)
+                {
+                    yield return $"{assembly.FileName}: {assembly.Describe(method)} takes the address of {declaringType}.{fieldName} ({op.Name} at IL_{instruction.Offset:x4})";
+                }
+                else if ((op == OpCodes.Stfld && !ReceivesConstantNull(assembly, method, instruction.Offset, 1))
+                    || (op == OpCodes.Stsfld && !ReceivesConstantNull(assembly, method, instruction.Offset, 0)))
+                {
+                    yield return $"{assembly.FileName}: {assembly.Describe(method)} stores a value that may not be null in {declaringType}.{fieldName} ({op.Name} at IL_{instruction.Offset:x4})";
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// (l) Rules (f), (h), (i) and (j) follow the callers of a native function inside the assembly that declares it. A
+    /// caller in another assembly (say, after the declarations move into a shared project) would be invisible to them.
+    /// So every P/Invoke, and the LibraryImport wrapper around it, may only be called from its own assembly: it is
+    /// neither public nor protected, and the assembly shares its internal code only with <paramref name="testAssembly"/>,
+    /// which never ships.
+    /// </summary>
+    public static IEnumerable<string> NativeImportsCallableFromOtherAssemblies(AssemblyScanner assembly, string testAssembly)
+    {
+        foreach (string friend in assembly.InternalsVisibleTo())
+        {
+            if (!string.Equals(friend, testAssembly, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return $"{assembly.FileName}: shares its internal code with {friend} (InternalsVisibleTo), which could call its native functions where the scan doesn't look";
+            }
+        }
+
+        foreach (PInvokeImport p in assembly.PInvokes())
+        {
+            if (assembly.IsVisibleOutsideAssembly(p.Handle))
+            {
+                yield return $"{assembly.FileName}: {p.Method} imports {p.Module}!{p.EntryPoint} and can be called from another assembly; make it private or internal";
+            }
+        }
+
+        foreach (MethodDefinitionHandle method in assembly.Metadata.MethodDefinitions)
+        {
+            if (assembly.IsLibraryImportWrapper(method) && assembly.IsVisibleOutsideAssembly(method))
+            {
+                yield return $"{assembly.FileName}: {assembly.Describe(method)} wraps a native function and can be called from another assembly; make it private or internal";
+            }
+        }
+    }
+
+    /// <summary>
+    /// True when the IL provably passes a constant null as argument <paramref name="argumentIndex"/> of the direct call
+    /// at <paramref name="site"/> (counted from 0; for an instance method the instance comes first). A delegate or
+    /// function pointer (ldftn) can be called later with anything, so it is never provable.
+    /// </summary>
+    public static bool PassesConstantNull(AssemblyScanner assembly, CallSite site, int argumentIndex) =>
+        site.Instruction is "call" or "callvirt" && ReceivesConstantNull(assembly, site.CallerHandle, site.ILOffset, argumentIndex);
+
+    /// <summary>
+    /// True when the instruction at <paramref name="offset"/> provably takes a constant null as its operand number
+    /// <paramref name="operandIndex"/>, counted from the first value it takes off the stack. A constant null is ldnull,
+    /// or ldc.i4.0 on its own or followed by conv.i or conv.u (how C# writes a null pointer). The evaluation stack is
+    /// followed back from the instruction through straight-line code only: if control can arrive anywhere in between
+    /// (a branch target, the start of a handler), the value could come from another path, and this returns false.
+    /// </summary>
+    public static bool ReceivesConstantNull(AssemblyScanner assembly, MethodDefinitionHandle method, int offset, int operandIndex)
+    {
+        IReadOnlyList<ILInstruction> code = assembly.Instructions(method);
+        IReadOnlySet<int> joins = assembly.JumpTargets(method);
+        int at = 0;
+        while (at < code.Count && code[at].Offset != offset)
+        {
+            at++;
+        }
+
+        if (at == code.Count)
+        {
+            return false;
+        }
+
+        int operands = assembly.StackEffect(method, code[at]).Pops;
+        if (operandIndex < 0 || operandIndex >= operands)
+        {
+            return false;
+        }
+
+        // How many values lie on top of the wanted one, walking back one instruction at a time.
+        int above = operands - 1 - operandIndex;
+        for (int i = at - 1; i >= 0; i--)
+        {
+            if (joins.Contains(code[i + 1].Offset) || code[i].OpCode.FlowControl is FlowControl.Branch or FlowControl.Return or FlowControl.Throw)
+            {
+                return false;
+            }
+
+            (int pops, int pushes) = assembly.StackEffect(method, code[i]);
+            if (above < pushes)
+            {
+                // code[i] put the wanted value there. "dup" makes two copies of an older value: not provable.
+                return pushes == 1 && IsNullConstant(code, i, joins);
+            }
+
+            above += pops - pushes;
+        }
+
+        return false;
+    }
+
+    private static bool IsNullConstant(IReadOnlyList<ILInstruction> code, int index, IReadOnlySet<int> joins)
+    {
+        OpCode op = code[index].OpCode;
+        if (op == OpCodes.Ldnull || op == OpCodes.Ldc_I4_0)
+        {
+            return true;
+        }
+
+        return (op == OpCodes.Conv_U || op == OpCodes.Conv_I)
+            && index > 0
+            && code[index - 1].OpCode == OpCodes.Ldc_I4_0
+            && !joins.Contains(code[index].Offset);
+    }
+
+    /// <summary>Every call of a matching native function from code outside <paramref name="allowedType"/>, looking
+    /// through LibraryImport wrappers to the real caller.</summary>
+    private static IEnumerable<string> NativeCallsOutside(AssemblyScanner assembly, Func<string, bool> matches, string allowedType)
+    {
+        foreach (PInvokeImport p in assembly.PInvokes())
+        {
+            if (!matches(p.EntryPoint))
+            {
+                continue;
+            }
+
+            foreach (CallSite site in EffectiveCallers(assembly, p))
+            {
+                if (!site.Caller.IsInType(allowedType))
+                {
+                    yield return $"{assembly.FileName}: {site.Caller} calls native {p.Module}!{p.EntryPoint} ({site.Instruction})";
+                }
+            }
+        }
     }
 
     /// <summary>"Ns.Type{System.Int32}" -> "Ns.Type": a call on a generic type names one instantiation of it.</summary>

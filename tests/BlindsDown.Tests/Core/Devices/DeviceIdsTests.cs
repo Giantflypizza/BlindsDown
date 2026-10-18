@@ -5,7 +5,7 @@ namespace BlindsDown.Tests.Core.Devices;
 public sealed class DeviceIdsTests
 {
     [Theory]
-    [InlineData(@"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000", "USB")]
+    [InlineData(@"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000", "USB")]
     [InlineData(@"swd\mmdevapi\{0.0.1.00000000}.{guid}", "SWD")]
     [InlineData("ROOT", "ROOT")]
     [InlineData(null, null)]
@@ -18,7 +18,7 @@ public sealed class DeviceIdsTests
     [InlineData(@"ROOT\MEDIA\0000", true)]
     [InlineData(@"SWD\MMDEVAPI\X", true)]
     [InlineData(@"sw\{guid}\Sonar", true)]
-    [InlineData(@"USB\VID_1038&PID_12E0&MI_00\9&1&0&0000", false)]
+    [InlineData(@"USB\VID_1234&PID_5678&MI_00\9&1&0&0000", false)]
     [InlineData(@"HDAUDIO\FUNC_01&VEN_10EC\4&1&0&0001", false)]
     [InlineData(@"BTHENUM\{0000111e}\8&1", false)]
     [InlineData(@"SWDX\Y", false)]
@@ -27,8 +27,8 @@ public sealed class DeviceIdsTests
         Assert.Equal(expected, DeviceIds.IsVirtualHardware(instanceId));
 
     [Theory]
-    [InlineData(@"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000", @"USB\VID_1038&PID_12E0&MI_00")]
-    [InlineData(@"usb\vid_1038&pid_12e0&mi_00\A&1234ABCD&0&0000", @"USB\VID_1038&PID_12E0&MI_00")]
+    [InlineData(@"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000", @"USB\VID_1234&PID_5678&MI_00")]
+    [InlineData(@"usb\vid_1234&pid_5678&mi_00\A&1234ABCD&0&0000", @"USB\VID_1234&PID_5678&MI_00")]
     [InlineData("NOSLASH", "NOSLASH")]
     [InlineData(@"\LEADING", @"\LEADING")]
     [InlineData(null, "")]
@@ -39,14 +39,14 @@ public sealed class DeviceIdsTests
     [Fact]
     public void StableKeySurvivesAPortChangeButNotAModelChange()
     {
-        string port1 = DeviceIds.StableMicKey(@"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000", "Microphone");
-        string port2 = DeviceIds.StableMicKey(@"USB\VID_1038&PID_12E0&MI_00\A&1234ABCD&0&0000", " microphone ");
-        string otherEndpoint = DeviceIds.StableMicKey(@"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000", "Line In");
+        string port1 = DeviceIds.StableMicKey(@"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000", "Microphone");
+        string port2 = DeviceIds.StableMicKey(@"USB\VID_1234&PID_5678&MI_00\A&1234ABCD&0&0000", " microphone ");
+        string otherEndpoint = DeviceIds.StableMicKey(@"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000", "Line In");
 
-        Assert.Equal(@"mic|USB\VID_1038&PID_12E0&MI_00|MICROPHONE", port1);
+        Assert.Equal(@"mic|USB\VID_1234&PID_5678&MI_00|MICROPHONE", port1);
         Assert.Equal(port1, port2);
         Assert.NotEqual(port1, otherEndpoint);
-        Assert.Equal("mic||MICROPHONE (ARCTIS)", DeviceIds.StableMicKey(null, "Microphone (Arctis)"));
+        Assert.Equal("mic||MICROPHONE (USB HEADSET)", DeviceIds.StableMicKey(null, "Microphone (USB Headset)"));
     }
 
     [Theory]

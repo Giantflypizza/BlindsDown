@@ -9,8 +9,8 @@ namespace BlindsDown.Interop.CoreAudio;
 // in ComRef (deterministic release) and frees strings itself, and nothing is read unless the HRESULT succeeded.
 
 /// <summary>
-/// The Windows audio device enumerator (CLSID_MMDeviceEnumerator). This is the only COM class BlindsDown
-/// ever creates; every other audio object is obtained from it.
+/// The Windows audio device enumerator (CLSID_MMDeviceEnumerator). One of only two COM classes BlindsDown ever
+/// creates (the other is <see cref="PolicyConfigClientCoClass"/>); every other audio object is obtained from it.
 /// </summary>
 [ComImport]
 [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]

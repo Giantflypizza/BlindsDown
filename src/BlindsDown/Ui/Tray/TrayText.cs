@@ -13,34 +13,53 @@ internal static class TrayText
     /// <summary>Menu lines longer than this make the menu uncomfortably wide.</summary>
     public const int MaxMenuLineLength = 64;
 
-    public static string Headline(LockState state) => state switch
+    /// <summary>True when the camera helper has at least one camera turned off for this lock.</summary>
+    public static bool CamerasLocked(LockStatusInfo status)
     {
-        LockState.Locked => "Microphones locked",
-        LockState.PartiallyLocked => "Microphones partially locked",
-        LockState.Locking => "Locking microphones…",
-        LockState.Unlocking => "Unlocking microphones…",
-        _ => "Microphones unlocked",
+        ArgumentNullException.ThrowIfNull(status);
+        return status.Devices.Any(d => d.Kind == DeviceKind.Camera && d.Protection == DeviceProtection.DeviceDisabled);
+    }
+
+    /// <summary>
+    /// Whether the tray speaks of cameras too. While locked (or unlocking) only when a camera really is turned
+    /// off, so it never claims more than is true; otherwise when the next lock includes cameras
+    /// (<paramref name="cameraLockOn"/>: the helper works and "Lock cameras" is on).
+    /// </summary>
+    public static bool MentionsCameras(LockStatusInfo status, bool cameraLockOn)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        return status.IsLockedOrPartly || status.State == LockState.Unlocking ? CamerasLocked(status) : cameraLockOn;
+    }
+
+    public static string Headline(LockState state, bool cameras = false) => state switch
+    {
+        LockState.Locked => cameras ? "Microphones and cameras locked" : "Microphones locked",
+        LockState.PartiallyLocked => cameras ? "Microphones and cameras partially locked" : "Microphones partially locked",
+        LockState.Locking => cameras ? "Locking microphones and cameras…" : "Locking microphones…",
+        LockState.Unlocking => cameras ? "Unlocking microphones and cameras…" : "Unlocking microphones…",
+        _ => cameras ? "Microphones and cameras unlocked" : "Microphones unlocked",
     };
 
     /// <summary>Text of the lock/unlock menu item (the hotkey is shown separately, right-aligned).</summary>
-    public static string ToggleLabel(LockState state) => state switch
+    public static string ToggleLabel(LockState state, bool cameras = false) => state switch
     {
-        LockState.Locked or LockState.PartiallyLocked => "&Unlock microphones",
+        LockState.Locked or LockState.PartiallyLocked => cameras ? "&Unlock microphones and cameras" : "&Unlock microphones",
         LockState.Locking => "Locking…",
         LockState.Unlocking => "Unlocking…",
-        _ => "&Lock microphones",
+        _ => cameras ? "&Lock microphones and cameras" : "&Lock microphones",
     };
 
     /// <summary>
-    /// "BlindsDown: microphones locked" plus one line per device kind in use right now, e.g.
-    /// "Mic in use: Discord (via SteelSeries Sonar), Zoom". Always at most <see cref="MaxTooltipLength"/>.
+    /// "BlindsDown: microphones locked" (or "microphones and cameras locked", see <see cref="MentionsCameras"/>)
+    /// plus one line per device kind in use right now, e.g. "Mic in use: Discord (via SteelSeries Sonar), Zoom".
+    /// Always at most <see cref="MaxTooltipLength"/>.
     /// </summary>
-    public static string Tooltip(LockStatusInfo status, IReadOnlyList<UsageSession> active)
+    public static string Tooltip(LockStatusInfo status, IReadOnlyList<UsageSession> active, bool cameraLockOn = false)
     {
         ArgumentNullException.ThrowIfNull(status);
         ArgumentNullException.ThrowIfNull(active);
 
-        string first = "BlindsDown: " + LowerFirst(Headline(status.State));
+        string first = "BlindsDown: " + LowerFirst(Headline(status.State, MentionsCameras(status, cameraLockOn)));
         if (status.State == LockState.PartiallyLocked && status.Problems.Count > 0)
         {
             first += status.Problems.Count == 1 ? " (1 problem)" : $" ({status.Problems.Count} problems)";
@@ -76,7 +95,7 @@ internal static class TrayText
 
         if (status.Problems.Count == 0)
         {
-            return "Some microphones are not protected";
+            return status.Devices.Any(d => d.Kind != DeviceKind.Microphone) ? "Some devices are not protected" : "Some microphones are not protected";
         }
 
         string suffix = status.Problems.Count > 1 ? $" (+{status.Problems.Count - 1} more)" : string.Empty;

@@ -116,6 +116,17 @@ internal sealed class AlertPopupManager : IDisposable
         }
     }
 
+    /// <summary>Closes the popup with this <see cref="AlertModel.GroupKey"/>, if one is open (e.g. a warning that no
+    /// longer applies).</summary>
+    public void Dismiss(string groupKey)
+    {
+        string key = "group" + groupKey;
+        foreach (AlertPopupForm popup in _popups.Where(p => p.Key == key && !p.IsDisposed).ToList())
+        {
+            popup.Close();
+        }
+    }
+
     public void DismissAll()
     {
         _closingAll = true;

@@ -2,18 +2,25 @@ namespace BlindsDown.Ui.Forms;
 
 /// <summary>
 /// First-run welcome: what BlindsDown does, the hotkey, the no-internet promise, how to keep the tray
-/// icon visible on Windows 11 (which hides new tray icons), and the "Start with Windows" choice.
+/// icon visible on Windows 11 (which hides new tray icons), the "Start with Windows" choice and, when offered,
+/// "Also lock my cameras" (unchecked: installing the camera helper needs an administrator prompt, so it is
+/// never the default).
 /// </summary>
 internal sealed class WelcomeForm : Form
 {
     private readonly Font _font;
     private readonly CheckBox _startWithWindows;
+    private readonly CheckBox? _lockCameras;
 
-    public WelcomeForm(string hotkeyText, bool startWithWindows)
+    public WelcomeForm(string hotkeyText, bool startWithWindows, bool offerCameraLock = false)
     {
         _font = Theme.BodyFont;
         _startWithWindows = DialogLayout.Check("Start BlindsDown when I sign in to Windows", startWithWindows);
         _startWithWindows.Margin = new Padding(0, 6, 0, 4);
+        if (offerCameraLock)
+        {
+            _lockCameras = DialogLayout.Check("Also lock my cameras", false);
+        }
 
         SuspendLayout();
         DialogLayout.Initialize(this, "Welcome to BlindsDown", _font);
@@ -25,7 +32,9 @@ internal sealed class WelcomeForm : Form
         TableLayoutPanel content = DialogLayout.Stack(new Padding(24, 20, 24, 12));
         DialogLayout.AddRow(content, DialogLayout.Text("Welcome to BlindsDown", TextRole.Title, new Padding(0, 0, 0, 8)));
         DialogLayout.AddRow(content, DialogLayout.Text(
-            "BlindsDown is a privacy lock for your microphones. One hotkey mutes all of them, keeps them muted while locked, and puts everything back exactly as it was when you unlock.",
+            offerCameraLock
+                ? "BlindsDown is a privacy lock for your microphones and cameras. One hotkey mutes every microphone (and, if you like, turns your cameras off), keeps them that way while locked, and puts everything back exactly as it was when you unlock."
+                : "BlindsDown is a privacy lock for your microphones. One hotkey mutes all of them, keeps them muted while locked, and puts everything back exactly as it was when you unlock.",
             margin: new Padding(0, 0, 0, 12)));
 
         DialogLayout.AddRow(content, DialogLayout.Heading("Your hotkey", first: true));
@@ -46,6 +55,13 @@ internal sealed class WelcomeForm : Form
         taskbar.Click += (_, _) => SettingsLinks.OpenTaskbar();
         DialogLayout.AddRow(content, taskbar);
         DialogLayout.AddRow(content, _startWithWindows);
+        if (_lockCameras is not null)
+        {
+            DialogLayout.AddRow(content, _lockCameras);
+            DialogLayout.AddRow(content, DialogLayout.Hint(
+                "Windows asks for administrator permission once to install a small helper. You can change this later in Settings > Camera.",
+                new Padding(20, 0, 0, 4)));
+        }
 
         Button start = DialogLayout.Button("Get started", DialogResult.OK);
         AcceptButton = start;
@@ -57,6 +73,9 @@ internal sealed class WelcomeForm : Form
     }
 
     public bool StartWithWindows => _startWithWindows.Checked;
+
+    /// <summary>The "Also lock my cameras" checkbox (false when it wasn't offered).</summary>
+    public bool LockCameras => _lockCameras?.Checked == true;
 
     protected override void OnShown(EventArgs e)
     {

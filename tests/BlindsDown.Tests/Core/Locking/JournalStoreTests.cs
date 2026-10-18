@@ -25,7 +25,7 @@ public sealed class JournalStoreTests : IDisposable
         Assert.True(loaded.ExitedCleanlyWhileLocked);
         LockAction action = Assert.Single(loaded.Actions);
         Assert.Equal("{0.0.1.00000000}.{A}", action.TargetId);
-        Assert.Equal("Microphone (Arctis)", action.DisplayName);
+        Assert.Equal("Microphone (USB Headset)", action.DisplayName);
         Assert.Equal(ActionStatus.RevertPending, action.Status);
         Assert.True(action.WasAlreadyLocked);
         Assert.Equal(3, action.GuardCount);
@@ -33,8 +33,73 @@ public sealed class JournalStoreTests : IDisposable
         Assert.Equal("note", action.Note);
         MicEndpoint mic = Assert.Single(loaded.Before!.Mics);
         Assert.Equal(journal.Before!.Mics[0], mic);
-        Assert.Equal("mic|USB\\VID_1038&PID_12E0&MI_00|MICROPHONE (ARCTIS)", mic.StableKey);
+        Assert.Equal("mic|USB\\VID_1234&PID_5678&MI_00|MICROPHONE (USB HEADSET)", mic.StableKey);
         Assert.Equal(journal.Before.Defaults, loaded.Before.Defaults);
+    }
+
+    [Fact]
+    public void StrongerLockFieldsRoundTrip()
+    {
+        var store = new FileJournalStore(_temp.File("lock-journal.json"));
+        LockJournal journal = SampleJournal();
+        journal.DisableMicEndpoints = true;
+        journal.EndpointDisableUnavailable = true;
+        journal.HelperMayMoveDefaults = true;
+        journal.DefaultsWhileLocked = new DefaultMics("{0.0.1.00000000}.{V}", null, "{0.0.1.00000000}.{V}");
+        journal.Actions.Add(new LockAction
+        {
+            Kind = ActionKind.DisableMicEndpoint,
+            TargetId = "{0.0.1.00000000}.{A}",
+            DisplayName = "Microphone (USB Headset)",
+            Status = ActionStatus.Planned,
+            Note = "Kept on so Windows doesn't switch apps to \"Headset\".",
+        });
+
+        store.Save(journal);
+        LockJournal loaded = store.Load()!;
+
+        Assert.True(loaded.DisableMicEndpoints);
+        Assert.True(loaded.EndpointDisableUnavailable);
+        Assert.True(loaded.HelperMayMoveDefaults);
+        Assert.Equal(journal.DefaultsWhileLocked, loaded.DefaultsWhileLocked);
+        LockAction turnOff = loaded.Actions[1];
+        Assert.Equal(ActionKind.DisableMicEndpoint, turnOff.Kind);
+        Assert.Equal(ActionStatus.Planned, turnOff.Status);
+        Assert.Equal(journal.Actions[1].Note, turnOff.Note);
+        Assert.Contains("\"kind\": \"DisableMicEndpoint\"", File.ReadAllText(_temp.File("lock-journal.json")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StageOneJournalLoadsAsAMuteOnlyLock()
+    {
+        string path = _temp.File("lock-journal.json");
+        File.WriteAllText(path, "{ \"version\": 1, \"phase\": \"Locked\", \"actions\": [ { \"kind\": \"MuteMic\", \"targetId\": \"x\", \"status\": \"Applied\" } ] }");
+
+        LockJournal loaded = new FileJournalStore(path).Load()!;
+
+        Assert.False(loaded.DisableMicEndpoints);
+        Assert.False(loaded.EndpointDisableUnavailable);
+        Assert.False(loaded.HelperMayMoveDefaults);
+        Assert.Null(loaded.DefaultsWhileLocked);
+        Assert.Null(Assert.Single(loaded.Actions).DefaultsToRestore);
+    }
+
+    [Fact]
+    public void PendingRestoreKeepsTheDefaultsItOwes()
+    {
+        var store = new FilePendingRestoreStore(_temp.File("pending-restores.json"));
+        var owed = new DefaultMics("{0.0.1.00000000}.{V}", "{0.0.1.00000000}.{V}", null);
+
+        store.Save(
+        [
+            new LockAction { Kind = ActionKind.DisableMicEndpoint, TargetId = "a", Status = ActionStatus.RevertPending },
+            new LockAction { Kind = ActionKind.MuteMic, TargetId = "a", Status = ActionStatus.RevertPending, DefaultsToRestore = owed },
+        ]);
+        List<LockAction> loaded = store.Load();
+
+        Assert.Equal([ActionKind.DisableMicEndpoint, ActionKind.MuteMic], loaded.Select(a => a.Kind));
+        Assert.Null(loaded[0].DefaultsToRestore);
+        Assert.Equal(owed, loaded[1].DefaultsToRestore);
     }
 
     [Fact]
@@ -181,6 +246,56 @@ public sealed class JournalStoreTests : IDisposable
     }
 
     [Fact]
+    public void PendingRestoresThatCantBeOpenedAreReportedNotTakenForNone()
+    {
+        string path = _temp.File("pending-restores.json");
+        var store = new FilePendingRestoreStore(path);
+        store.Save([new LockAction { TargetId = "old" }]);
+        store.Save([new LockAction { TargetId = "new" }]);
+
+        // Another program holds the file: neither "nothing owed" nor the older backup is the answer.
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Throws<PendingRestoreUnreadableException>(store.Load);
+        }
+
+        Assert.Equal("new", Assert.Single(store.Load()).TargetId);
+    }
+
+    [Fact]
+    public void JournalThatCantBeOpenedSaysSo()
+    {
+        string path = _temp.File("lock-journal.json");
+        new FileJournalStore(path).Save(SampleJournal());
+
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            JournalCorruptException ex = Assert.Throws<JournalCorruptException>(new FileJournalStore(path).Load);
+            Assert.Contains("could not be opened", ex.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void JournalHeldOpenForAMomentIsReadOnceItIsFree()
+    {
+        string path = _temp.File("lock-journal.json");
+        new FileJournalStore(path).Save(SampleJournal());
+        var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+        var release = new Thread(() =>
+        {
+            Thread.Sleep(20);
+            held.Dispose();
+        });
+
+        release.Start();
+        LockJournal? loaded = new FileJournalStore(path).Load();
+        release.Join();
+
+        Assert.NotNull(loaded);
+        Assert.Single(loaded.Actions);
+    }
+
+    [Fact]
     public void NullPendingEntriesAreDropped()
     {
         string path = _temp.File("pending-restores.json");
@@ -223,12 +338,12 @@ public sealed class JournalStoreTests : IDisposable
                 new MicEndpoint
                 {
                     Id = "{0.0.1.00000000}.{A}",
-                    Name = "Microphone (Arctis)",
+                    Name = "Microphone (USB Headset)",
                     EndpointDescription = "Microphone",
                     State = EndpointState.Active,
                     Muted = false,
                     HasHardwareMute = true,
-                    HardwareInstanceId = @"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000",
+                    HardwareInstanceId = @"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000",
                 },
             ],
             new DefaultMics("{0.0.1.00000000}.{A}", null, "{0.0.1.00000000}.{A}"),
@@ -239,7 +354,7 @@ public sealed class JournalStoreTests : IDisposable
             {
                 Kind = ActionKind.MuteMic,
                 TargetId = "{0.0.1.00000000}.{A}",
-                DisplayName = "Microphone (Arctis)",
+                DisplayName = "Microphone (USB Headset)",
                 WasAlreadyLocked = true,
                 Status = ActionStatus.RevertPending,
                 Note = "note",

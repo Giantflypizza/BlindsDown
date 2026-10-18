@@ -17,9 +17,39 @@ public interface IMicBackend
 
     /// <summary>
     /// Mutes or unmutes an endpoint. Implementations tag the change with BlindsDown's own event
-    /// context so our own changes can be told apart from other apps' changes. Throws on failure.
+    /// context so BlindsDown's own changes can be told apart from other apps' changes. Throws on failure.
     /// </summary>
     void SetMute(string endpointId, bool muted);
+
+    /// <summary>
+    /// Turns a microphone on or off in Windows: the Sound settings "Allow" / "Don't allow" switch
+    /// (IPolicyConfig::SetEndpointVisibility). Off, apps can't open it at all. Throws
+    /// <see cref="DeviceOperationException"/> (with <see cref="DeviceErrorKind.AccessDenied"/> when Windows
+    /// requires administrator rights for it).
+    /// </summary>
+    void SetEndpointEnabled(string endpointId, bool enabled);
+
+    /// <summary>Makes a microphone the Windows default for one role (IPolicyConfig::SetDefaultEndpoint).</summary>
+    void SetDefaultMic(string endpointId, MicRole role);
+}
+
+/// <summary>The three Windows default-device roles (ERole).</summary>
+public enum MicRole
+{
+    Console = 0,
+    Multimedia = 1,
+    Communications = 2,
+}
+
+public enum DeviceErrorKind
+{
+    Failed,
+
+    /// <summary>Windows refused because administrator rights are required.</summary>
+    AccessDenied,
+
+    /// <summary>The operation isn't supported for this device or on this Windows version.</summary>
+    NotSupported,
 }
 
 /// <summary>Thrown by a backend when a device operation fails.</summary>
@@ -33,6 +63,14 @@ public sealed class DeviceOperationException : Exception
         : base(message)
     {
     }
+
+    public DeviceOperationException(string message, DeviceErrorKind kind)
+        : base(message)
+    {
+        ErrorKind = kind;
+    }
+
+    public DeviceErrorKind ErrorKind { get; }
 
     public DeviceOperationException(string message, Exception innerException)
         : base(message, innerException)

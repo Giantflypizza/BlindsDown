@@ -22,6 +22,7 @@ internal sealed class OsdWindow : Form
     private string? _detail;
     private float _scale = 1f;
     private bool _dark;
+    private bool _cameras;
 
     public OsdWindow()
     {
@@ -51,12 +52,13 @@ internal sealed class OsdWindow : Form
     }
 
     /// <summary>Shows (or replaces) the content at <paramref name="bounds"/> (physical pixels), fully opaque again.</summary>
-    public void ShowContent(LockState state, string? detail, float scale, Rectangle bounds, bool hideFromCapture)
+    public void ShowContent(LockState state, string? detail, float scale, Rectangle bounds, bool hideFromCapture, bool cameras = false)
     {
         FormScreenCaptureMode = hideFromCapture ? ScreenCaptureMode.HideWindow : ScreenCaptureMode.Allow;
         _state = state;
         _detail = detail;
         _scale = scale;
+        _cameras = cameras;
         _dark = Theme.AppsUseDarkMode();
         BackColor = _dark ? Theme.DarkSurface : Theme.LightSurface;
         FormBorderColor = OverlayPainter.StateColor(state); // Windows 11 draws a 1 px border in this colour
@@ -80,7 +82,7 @@ internal sealed class OsdWindow : Form
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        OverlayPainter.DrawOsd(e.Graphics, ClientRectangle, _state, _detail, _scale, _dark);
+        OverlayPainter.DrawOsd(e.Graphics, ClientRectangle, _state, _detail, _scale, _dark, _cameras);
     }
 
     protected override void WndProc(ref Message m)

@@ -1,7 +1,9 @@
 using System.Drawing.Imaging;
+using BlindsDown.Core.Locking;
 using BlindsDown.Ui;
 using BlindsDown.Ui.Forms;
 using static BlindsDown.Tests.Dialogs.DialogsQaHarness;
+using UiDialogs = BlindsDown.Ui.Dialogs;
 
 namespace BlindsDown.Tests.Dialogs;
 
@@ -32,6 +34,9 @@ public sealed class VisualQaTests
                 written.AddRange(RenderPopups(dir, dpi, scale));
                 written.AddRange(RenderForms(dir, dpi, scale));
             }
+
+            // Windows draws task dialogs itself, at the system DPI and always light.
+            written.AddRange(RenderConfirmations(dir));
 
             // Dark mode (what Program enables on Windows 11 when the user chose dark apps).
             Application.SetColorMode(SystemColorMode.Dark);
@@ -107,22 +112,78 @@ public sealed class VisualQaTests
         var paths = new List<string>();
         string P(string name) => Path.Combine(dir, $"{name}-{scale}.png");
 
-        foreach (string tab in new[] { "General", "Indicator", "Devices", "Alerts", "History" })
+        var working = new HelperUiState(HelperAvailability.Working, "0.2.0");
+        foreach (string tab in new[] { "General", "Camera", "Indicator", "Devices", "Alerts", "History" })
         {
-            using var settings = new SettingsForm(Samples.Settings(), Samples.Devices(locked: false), locked: false, startWithWindows: true, _ => null);
+            using var settings = new SettingsForm(Samples.Settings(), Samples.Devices(locked: false), locked: false, startWithWindows: true, _ => null, helper: working);
             Render(settings, dpi, P("settings-" + tab.ToLowerInvariant()), f => ((SettingsForm)f).SelectTab(tab));
             paths.Add(P("settings-" + tab.ToLowerInvariant()));
         }
 
-        using (var locked = new SettingsForm(Samples.Settings(), Samples.Devices(locked: true), locked: true, startWithWindows: false, _ => null))
+        // Every helper state, switched in place on one window (as the app does while Settings stays open).
+        using (var camera = new SettingsForm(Samples.Settings(), Samples.Devices(locked: false), locked: false, startWithWindows: true, _ => null))
+        {
+            IReadOnlyList<HelperUiState> states = Samples.HelperStates();
+            for (int i = 0; i < states.Count; i++)
+            {
+                HelperUiState state = states[i];
+                string name = $"settings-camera-{i}-{state.Availability.ToString().ToLowerInvariant()}";
+                Render(camera, dpi, P(name), f =>
+                {
+                    var form = (SettingsForm)f;
+                    form.SetHelperState(state);
+                    form.SelectTab("Camera");
+                });
+                paths.Add(P(name));
+            }
+
+            // A working helper with "Lock cameras" unticked says camera lock is off.
+            Render(camera, dpi, P("settings-camera-lockoff"), f =>
+            {
+                var form = (SettingsForm)f;
+                form.SetHelperState(new HelperUiState(HelperAvailability.Working, "0.2.0"));
+                form.Camera.LockCameras.Checked = false;
+                form.SelectTab("Camera");
+            });
+            paths.Add(P("settings-camera-lockoff"));
+            camera.Camera.LockCameras.Checked = true;
+
+            // Without the helper, the Devices tab says which devices need it.
+            Render(camera, dpi, P("settings-devices-nohelper"), f =>
+            {
+                var form = (SettingsForm)f;
+                form.SetHelperState(HelperUiState.NotInstalled, [.. Samples.Devices(locked: false).Where(d => d.Kind == DeviceKind.Microphone), .. Samples.Cameras(locked: false, helper: false)]);
+                form.SelectTab("Devices");
+            });
+            paths.Add(P("settings-devices-nohelper"));
+        }
+
+        using (var locked = new SettingsForm(Samples.Settings(), Samples.Devices(locked: true), locked: true, startWithWindows: false, _ => null, helper: working))
         {
             Render(locked, dpi, P("settings-devices-locked"), f => ((SettingsForm)f).SelectTab("Devices"));
             paths.Add(P("settings-devices-locked"));
+            Render(locked, dpi, P("settings-camera-locked"), f => ((SettingsForm)f).SelectTab("Camera"));
+            paths.Add(P("settings-camera-locked"));
+        }
+
+        // The smallest the window can be: everything must still wrap rather than clip.
+        using (var small = new SettingsForm(Samples.Settings(), Samples.Devices(locked: false), locked: false, startWithWindows: true, _ => null, helper: working))
+        {
+            foreach (string tab in new[] { "General", "Camera", "Devices" })
+            {
+                string name = "settings-min-" + tab.ToLowerInvariant();
+                Render(small, dpi, P(name), f =>
+                {
+                    f.Size = f.MinimumSize;
+                    ((SettingsForm)f).SelectTab(tab);
+                });
+                paths.Add(P(name));
+            }
         }
 
         using (var activity = new ActivityForm())
         {
-            activity.SetData(Samples.Active(), Samples.History());
+            activity.SetData(Samples.Active(), Samples.History(), Samples.LockEvents());
             Render(activity, dpi, P("activity"));
             paths.Add(P("activity"));
         }
@@ -139,6 +200,25 @@ public sealed class VisualQaTests
             paths.Add(P("welcome"));
         }
 
+        using (var welcomeCameras = new WelcomeForm("Ctrl+Alt+Shift+M", startWithWindows: true, offerCameraLock: true))
+        {
+            Render(welcomeCameras, dpi, P("welcome-cameras"));
+            paths.Add(P("welcome-cameras"));
+        }
+
+        using (var cameraReport = new RestoreDetailsForm(Samples.CameraReport()))
+        {
+            Render(cameraReport, dpi, P("restore-details-cameras"));
+            paths.Add(P("restore-details-cameras"));
+        }
+
+        using (var tray = new TrayController())
+        {
+            var status = new LockStatusInfo(LockState.Locked, Samples.Devices(locked: true), []);
+            tray.SetStatus(status, BlindsDown.Core.Settings.Hotkey.Default, cameraLockOn: true);
+            paths.Add(RenderMenu(tray.Menu, P("tray-menu")));
+        }
+
         using (var about = new AboutForm("0.1.0"))
         {
             Render(about, dpi, P("about"));
@@ -152,5 +232,34 @@ public sealed class VisualQaTests
         }
 
         return paths;
+    }
+
+    /// <summary>The two confirmations before a UAC prompt, as Windows draws them (collapsed and with details).</summary>
+    private static List<string> RenderConfirmations(string dir)
+    {
+        var paths = new List<string>();
+        foreach ((string name, Func<TaskDialogPage> page, bool expanded) in new (string, Func<TaskDialogPage>, bool)[]
+        {
+            ("confirm-install", () => UiDialogs.ConfirmPage(DialogText.InstallHelper(), TaskDialogIcon.ShieldBlueBar), false),
+            ("confirm-install-details", () => UiDialogs.ConfirmPage(DialogText.InstallHelper(), TaskDialogIcon.ShieldBlueBar), true),
+            ("confirm-remove", () => UiDialogs.ConfirmPage(DialogText.RemoveHelper(locked: false), TaskDialogIcon.Information), false),
+            ("confirm-remove-locked", () => UiDialogs.ConfirmPage(DialogText.RemoveHelper(locked: true), TaskDialogIcon.Information), true),
+        })
+        {
+            string path = Path.Combine(dir, name + ".png");
+            RenderTaskDialog(page(), path, expanded);
+            paths.Add(path);
+        }
+
+        return paths;
+    }
+
+    /// <summary>Lays the tray menu out without opening it (opening would take the mouse) and draws it.</summary>
+    private static string RenderMenu(ContextMenuStrip menu, string path)
+    {
+        menu.PerformLayout();
+        menu.Size = menu.GetPreferredSize(Size.Empty);
+        Save(menu, path);
+        return path;
     }
 }

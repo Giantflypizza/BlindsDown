@@ -5,8 +5,8 @@ namespace BlindsDown.Audio;
 
 /// <summary>
 /// Real <see cref="IMicBackend"/> on top of Windows Core Audio
-/// (IMMDeviceEnumerator, IMMDevice, IPropertyStore, IAudioEndpointVolume).
-/// Create and use only on the <see cref="Infrastructure.EngineThread"/> (MTA).
+/// (IMMDeviceEnumerator, IMMDevice, IPropertyStore, IAudioEndpointVolume, and IPolicyConfig for the Sound settings
+/// switches). Create and use only on the <see cref="Infrastructure.EngineThread"/> (MTA).
 ///
 /// Every operation survives a restart of the Windows audio service (it reconnects and tries once more), and
 /// failures reach the lock engine as <see cref="DeviceOperationException"/> with a readable reason.
@@ -14,7 +14,14 @@ namespace BlindsDown.Audio;
 internal sealed class CoreAudioMicBackend : IMicBackend, IDisposable
 {
     private readonly EndpointEnumerator _enumerator = new("Microphones");
+    private readonly EndpointPolicyClient _policy = new();
     private readonly ProblemLog _problems = new("Microphones");
+    private readonly CoreAudioSwitchPort _switchPort;
+
+    public CoreAudioMicBackend()
+    {
+        _switchPort = new CoreAudioSwitchPort(_enumerator, _policy);
+    }
 
     /// <summary>Event context passed to SetMute so our own changes can be recognised in notifications.</summary>
     public static Guid EventContext { get; } = new("6f1d2b4e-8a43-4c1e-9d5b-2b3f7c0a9e11");
@@ -70,7 +77,69 @@ internal sealed class CoreAudioMicBackend : IMicBackend, IDisposable
         }
     }
 
-    public void Dispose() => _enumerator.Dispose();
+    /// <summary>
+    /// The Sound settings "Allow" / "Don't allow" switch (IPolicyConfig::SetEndpointVisibility), verified by reading
+    /// the endpoint's state back. See <see cref="EndpointSwitch.SetEnabled"/> for what is refused and how failures
+    /// are classified (E_ACCESSDENIED: <see cref="DeviceErrorKind.AccessDenied"/>; a missing interface:
+    /// <see cref="DeviceErrorKind.NotSupported"/>).
+    /// </summary>
+    public void SetEndpointEnabled(string endpointId, bool enabled)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(endpointId);
+        SwitchWithRecovery(() => EndpointSwitch.SetEnabled(_switchPort, endpointId, enabled));
+    }
+
+    /// <summary>
+    /// IPolicyConfig::SetDefaultEndpoint for one role, verified with GetDefaultAudioEndpoint. Does nothing when the
+    /// microphone already is that role's default.
+    /// </summary>
+    public void SetDefaultMic(string endpointId, MicRole role)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(endpointId);
+        DeviceRole deviceRole = role switch
+        {
+            MicRole.Console => DeviceRole.Console,
+            MicRole.Multimedia => DeviceRole.Multimedia,
+            MicRole.Communications => DeviceRole.Communications,
+            _ => throw new ArgumentOutOfRangeException(nameof(role), role, "Not a Windows device role."),
+        };
+
+        SwitchWithRecovery(() => EndpointSwitch.SetDefault(_switchPort, endpointId, deviceRole));
+    }
+
+    public void Dispose()
+    {
+        _enumerator.Dispose();
+        _policy.Reset();
+    }
+
+    /// <summary>
+    /// Runs a switch change with the usual audio-service recovery. After a service failure the policy object is
+    /// dropped together with the enumerator: both were made through the connection that just broke, and a retry on
+    /// the old policy object would fail again.
+    /// </summary>
+    private void SwitchWithRecovery(Action change)
+    {
+        try
+        {
+            _enumerator.WithRecovery(() =>
+            {
+                try
+                {
+                    change();
+                }
+                catch (CoreAudioException ex) when (CoreAudioErrors.IsServiceFailure(ex.HResult))
+                {
+                    _policy.Reset();
+                    throw;
+                }
+            });
+        }
+        catch (CoreAudioException ex)
+        {
+            throw new DeviceOperationException(ex.Explanation, EndpointSwitch.ErrorKindFor(ex.HResult));
+        }
+    }
 
     private List<MicEndpoint> ReadAllMics()
     {

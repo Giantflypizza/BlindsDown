@@ -11,7 +11,9 @@ namespace BlindsDown.Ui.Forms;
 ///  * WS_EX_TOPMOST set at creation instead of <see cref="Form.TopMost"/>, whose setter calls
 ///    SetWindowPos without SWP_NOACTIVATE.
 /// WS_EX_TOOLWINDOW keeps the window out of Alt+Tab and the taskbar. Content is owner-drawn: child
-/// controls would grab focus (and activate the window) when clicked.
+/// controls would grab focus (and activate the window) when clicked. A modal dialog on the same thread
+/// can't disable these windows: they enable themselves again (WM_ENABLE), so popups stay usable while
+/// Settings or About is open.
 /// </summary>
 internal abstract class NoActivateForm : Form
 {
@@ -71,6 +73,21 @@ internal abstract class NoActivateForm : Form
         {
             case PopupNative.WM_MOUSEACTIVATE:
                 m.Result = PopupNative.MA_NOACTIVATE;
+                return;
+            case PopupNative.WM_ENABLE when m.WParam == 0:
+                // A modal dialog on this thread (Settings, About, Welcome, a task dialog) disables every other
+                // top-level window of the thread, these floating ones included: their Close and action buttons
+                // would stop working until it closes. They are independent of any dialog, so they enable
+                // themselves again. Posted, not called: this runs inside the EnableWindow call that disabled
+                // this window.
+                base.WndProc(ref m);
+                BeginInvoke(() =>
+                {
+                    if (!IsDisposed && IsHandleCreated)
+                    {
+                        PopupNative.EnableWindow(Handle, true);
+                    }
+                });
                 return;
             case PopupNative.WM_DISPLAYCHANGE:
             case PopupNative.WM_SETTINGCHANGE when m.WParam == PopupNative.SPI_SETWORKAREA:

@@ -57,7 +57,9 @@ M:System.Reflection.Assembly.UnsafeLoadFrom(System.String);Loading code from a p
 M:System.Reflection.MethodBase.Invoke(System.Object,System.Object[]);Calling methods by name bypasses the static scan
 
 # Things that can reach other machines or browse network locations (second review round).
-T:System.IO.Pipes.NamedPipeClientStream;Can connect to pipes on other machines; Stage 2 adds one audited local-only wrapper
+# The compiled-program scan (tests/BlindsDown.Tests/NoNetwork) checks every entry in this file again, because a
+# "#pragma warning disable RS0030" switches this analyzer off; a self-test fails if an entry has no matching rule there.
+T:System.IO.Pipes.NamedPipeClientStream;Can connect to pipes on other machines; the helper client opens only its local pipe, with CreateFileW
 T:System.Windows.Forms.OpenFileDialog;Shell file dialogs browse network locations
 T:System.Windows.Forms.SaveFileDialog;Shell file dialogs browse network locations
 T:System.Windows.Forms.FolderBrowserDialog;Shell file dialogs browse network locations

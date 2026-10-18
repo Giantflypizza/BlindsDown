@@ -21,7 +21,7 @@ public sealed record MicEndpoint
     /// <summary>The opaque Windows endpoint ID, e.g. "{0.0.1.00000000}.{guid}". Compare, never parse.</summary>
     public required string Id { get; init; }
 
-    /// <summary>Full display name, e.g. "Microphone (Arctis Nova Pro Wireless)".</summary>
+    /// <summary>Full display name, e.g. "Microphone (USB Headset)".</summary>
     public required string Name { get; init; }
 
     /// <summary>The endpoint's own description without the adapter name, e.g. "Microphone".</summary>
@@ -38,7 +38,7 @@ public sealed record MicEndpoint
     /// </summary>
     public bool HasHardwareMute { get; init; }
 
-    /// <summary>PnP instance ID of the hardware behind the endpoint, e.g. "USB\VID_1038&amp;PID_12E0&amp;MI_00\9&amp;1601...".</summary>
+    /// <summary>PnP instance ID of the hardware behind the endpoint, e.g. "USB\VID_1234&amp;PID_5678&amp;MI_00\9&amp;1A2B...".</summary>
     public string? HardwareInstanceId { get; init; }
 
     /// <summary>True when the hardware is a software (virtual) device such as SteelSeries Sonar or VB-Cable.</summary>
@@ -64,7 +64,7 @@ public sealed record DefaultMics(string? Console, string? Multimedia, string? Co
         || string.Equals(Communications, endpointId, StringComparison.OrdinalIgnoreCase);
 }
 
-/// <summary>Everything we know about the microphones at one moment.</summary>
+/// <summary>Everything BlindsDown knows about the microphones at one moment.</summary>
 public sealed record AudioSnapshot(IReadOnlyList<MicEndpoint> Mics, DefaultMics Defaults, DateTimeOffset TakenAt)
 {
     public MicEndpoint? Find(string endpointId) =>
@@ -98,7 +98,7 @@ public static class DeviceIds
     }
 
     /// <summary>
-    /// Instance IDs look like "USB\VID_1038&amp;PID_12E0&amp;MI_00\9&amp;16010608&amp;0&amp;0000". The last part
+    /// Instance IDs look like "USB\VID_1234&amp;PID_5678&amp;MI_00\9&amp;1A2B3C4D&amp;0&amp;0000". The last part
     /// changes when the same device is plugged into another port, so the stable part is everything before it.
     /// </summary>
     public static string HardwareKey(string? instanceId)
@@ -146,6 +146,11 @@ public static class DeviceIds
     public static string StableMicKey(string? hardwareInstanceId, string name) =>
         $"mic|{HardwareKey(hardwareInstanceId)}|{DuplicateNumber.Replace(name.Trim(), "(").ToUpperInvariant()}";
 
+    /// <summary>Stable identity of a PnP device: prefix "cam" for cameras, "hw" for microphone hardware.
+    /// Built the same way as <see cref="StableMicKey"/>.</summary>
+    public static string StableDeviceKey(string prefix, string? instanceId, string name) =>
+        $"{prefix}|{HardwareKey(instanceId)}|{DuplicateNumber.Replace(name.Trim(), "(").ToUpperInvariant()}";
+
     private static readonly System.Text.RegularExpressions.Regex DuplicateNumber =
         new(@"\(\d+- ", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 }
@@ -155,7 +160,9 @@ public static class DeviceIds
 /// made for (its Windows ID). Only when that device is gone (e.g. plugged into another USB port, which
 /// gives it a new ID) does the exclusion follow it by <see cref="DeviceIds.StableMicKey"/>, and only if
 /// exactly one connected device has that identity, so excluding one of two identical mics never
-/// excludes the other.
+/// excludes the other. Nor does it ever follow to a twin that was already connected when the exclusion
+/// was made (its twin IDs): that one is not the excluded device in a new place, even when the excluded
+/// one is unplugged.
 /// </summary>
 public static class ExclusionRules
 {
@@ -167,6 +174,18 @@ public static class ExclusionRules
         IEnumerable<(string StableKey, string? LastKnownId)> exclusions,
         string id,
         string stableKey,
+        IReadOnlyCollection<(string Id, string StableKey)> connected) =>
+        IsExcluded(exclusions.Select(e => (e.StableKey, e.LastKnownId, (IReadOnlyList<string>?)null)), id, stableKey, connected);
+
+    /// <param name="exclusions">(StableKey, LastKnownId, TwinIds) of every exclusion. TwinIds are the IDs of the other
+    /// devices with the same stable key that were connected when the exclusion was made (null when not known).</param>
+    /// <param name="id">The device being checked.</param>
+    /// <param name="stableKey">Its stable key.</param>
+    /// <param name="connected">(Id, StableKey) of every device that is connected right now (not "not present").</param>
+    public static bool IsExcluded(
+        IEnumerable<(string StableKey, string? LastKnownId, IReadOnlyList<string>? TwinIds)> exclusions,
+        string id,
+        string stableKey,
         IReadOnlyCollection<(string Id, string StableKey)> connected)
     {
         var list = exclusions.ToList();
@@ -175,11 +194,16 @@ public static class ExclusionRules
             return true;
         }
 
-        foreach ((string key, string? lastKnownId) in list.Where(e => Same(e.StableKey, stableKey)))
+        foreach ((string key, string? lastKnownId, IReadOnlyList<string>? twinIds) in list.Where(e => Same(e.StableKey, stableKey)))
         {
             if (lastKnownId is not null && connected.Any(c => Same(c.Id, lastKnownId)))
             {
                 continue; // The device this exclusion was made for is still here: it isn't this one.
+            }
+
+            if (twinIds is not null && twinIds.Any(twin => Same(twin, id)))
+            {
+                continue; // It was there next to the excluded device all along: its twin, not the excluded device moved.
             }
 
             if (connected.Count(c => Same(c.StableKey, key)) <= 1)
@@ -191,5 +215,5 @@ public static class ExclusionRules
         return false;
     }
 
-    private static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    private static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 }

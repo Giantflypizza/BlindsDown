@@ -51,6 +51,19 @@ internal sealed class HotkeyBox : TextBox
         }
     }
 
+    /// <summary>
+    /// Takes a combination the box could not see itself and finishes any capture with it, exactly as if it had been
+    /// typed: Windows hands a combination that is registered as a global hotkey (the current BlindsDown hotkey) to
+    /// its owner, never to the focused box, so the host passes it on.
+    /// </summary>
+    public void TakeHotkey(Hotkey hotkey)
+    {
+        _value = hotkey;
+        _capturing = false;
+        ShowValue();
+        HotkeyChanged?.Invoke(hotkey);
+    }
+
     protected override void OnEnter(EventArgs e)
     {
         base.OnEnter(e);
@@ -186,10 +199,7 @@ internal sealed class HotkeyBox : TextBox
             return;
         }
 
-        _value = hotkey;
-        _capturing = false;
-        ShowValue();
-        HotkeyChanged?.Invoke(hotkey);
+        TakeHotkey(hotkey);
     }
 
     private void BeginCapture()

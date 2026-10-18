@@ -60,6 +60,14 @@ internal static class NetworkTripwire
         }
     }
 
+    /// <summary>
+    /// For processes without a screen to show an alert on: the helper service (in session 0), the elevated setup
+    /// runs and the command-line tools. The tripwire then only writes to the log that process uses (helper.log,
+    /// setup.log or the user's own log). Call it only in such a process, never before the tray app installs its own
+    /// handler: the first Install wins.
+    /// </summary>
+    public static void InstallLogOnly() => Install(static _ => { });
+
     /// <summary>Managed networking assemblies currently loaded (should always be empty).</summary>
     public static IReadOnlyList<string> LoadedManagedNetworkingAssemblies()
     {

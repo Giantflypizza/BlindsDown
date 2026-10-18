@@ -18,13 +18,13 @@ env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
 
 jobs:
-  build:
+  # Builds and tests the whole solution, test packages (xunit) included. It runs on its own machine with read
+  # access only: code from a test package never runs where the release is built or signed.
+  test:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write # sign the build provenance attestation (Sigstore)
-      attestations: write # store the attestation on GitHub
     defaults:
       run:
         shell: pwsh
@@ -35,7 +35,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # Latest .NET 10 patch: a self-contained exe ships the runtime it was built with.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
@@ -61,13 +60,38 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: dotnet build BlindsDown.slnx -c Release --no-restore "-p:Version=$env:VERSION"
 
-      # Includes the no-network scan of the compiled program.
+      - name: No-network scan of the built program
+        run: dotnet test BlindsDown.slnx -c Release --no-build --filter "FullyQualifiedName~BlindsDown.Tests.NoNetwork" --logger "console;verbosity=normal"
+
       - name: Test
-        run: dotnet test BlindsDown.slnx -c Release --no-build --logger "console;verbosity=normal"
+        run: dotnet test BlindsDown.slnx -c Release --no-build --filter "FullyQualifiedName!~BlindsDown.Tests.NoNetwork" --logger "console;verbosity=normal"
+
+  # Builds the release from a fresh checkout on a fresh machine and signs it. It never builds or loads the test
+  # project, so the only packages it uses are the app's own: Microsoft's service package and build-time analyzer.
+  build:
+    needs: test
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # sign the build provenance attestation (Sigstore)
+      attestations: write # store the attestation on GitHub
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Latest .NET 10 patch: a self-contained exe ships the runtime it was built with.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
 
       - name: Publish and zip
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           foreach ($rid in @('win-x64', 'win-arm64')) {
@@ -110,7 +134,7 @@ jobs:
           retention-days: 7
 
   release:
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -129,7 +153,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.test.outputs.version }}
         run: |
           set -euo pipefail
           ls -l dist
@@ -139,13 +163,13 @@ jobs:
 
           # A quoted heredoc keeps the Markdown backticks literal; the placeholders are filled in below.
           cat > notes-template.md <<'EOF'
-          BlindsDown @VERSION@: one hotkey mutes every microphone on your Windows PC. **It never connects to the internet.**
+          BlindsDown @VERSION@: one hotkey locks every microphone and camera on your Windows PC, and puts them back exactly as they were. **It never connects to the internet.**
 
           ### Download
           - `BlindsDown-@VERSION@-win-x64.zip`: most Windows PCs (Intel or AMD)
           - `BlindsDown-@VERSION@-win-arm64.zip`: Windows on ARM (for example Snapdragon laptops)
 
-          Unzip and run `BlindsDown.exe`. Nothing to install. The exe is not code-signed yet, so Windows SmartScreen may warn you: click **More info**, then **Run anyway**.
+          Unzip and run `BlindsDown.exe`. The microphone lock needs nothing installed. The camera lock is optional: it installs a small helper service, Windows asks for administrator permission once, and you can remove it again in BlindsDown's Settings > Camera or in Windows' Installed apps. The exe is not code-signed yet, so Windows SmartScreen may warn you: click **More info**, then **Run anyway**.
 
           ### Verify your download
           1. **Checksum.** In PowerShell: `Get-FileHash .\BlindsDown-@VERSION@-win-x64.zip -Algorithm SHA256`. The hash must match the line in `SHA256SUMS.txt`.

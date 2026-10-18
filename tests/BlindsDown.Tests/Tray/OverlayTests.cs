@@ -108,7 +108,9 @@ public class OverlayTests
         Size large = OverlayPainter.MeasurePill(LockState.Locked, 2f);
         Size partial = OverlayPainter.MeasurePill(LockState.PartiallyLocked, 1f);
 
-        Assert.InRange(large.Width, (small.Width * 2) - 6, (small.Width * 2) + 6);
+        // Roughly twice as wide: not exactly, because small text is grid-fitted (drawn a little narrower) and the
+        // pill follows the text as drawn.
+        Assert.InRange(large.Width, (small.Width * 2) - 6, (small.Width * 2) + 14);
         Assert.True(partial.Width > small.Width);
     }
 
@@ -136,6 +138,54 @@ public class OverlayTests
         Assert.Equal("Microphones unlocked", OverlayPainter.OsdTitle(LockState.Unlocked));
         Assert.Equal("PARTIALLY LOCKED", OverlayPainter.PillText(LockState.PartiallyLocked));
         Assert.Equal("MIC LOCKED", OverlayPainter.PillText(LockState.Locked));
+    }
+
+    [Fact]
+    public void PillAndFlashSayCamerasWhenTheyAreLocked()
+    {
+        Assert.Equal("MIC + CAMERA LOCKED", OverlayPainter.PillText(LockState.Locked, cameras: true));
+        Assert.Equal("PARTIALLY LOCKED", OverlayPainter.PillText(LockState.PartiallyLocked, cameras: true));
+        Assert.Equal("Microphones and cameras locked", OverlayPainter.OsdTitle(LockState.Locked, cameras: true));
+        Assert.Equal("Microphones and cameras unlocked", OverlayPainter.OsdTitle(LockState.Unlocked, cameras: true));
+        Assert.Equal("Every microphone is muted and every camera is off", OverlayPainter.OsdDetail(LockState.Locked, null, cameras: true));
+        Assert.True(OverlayPainter.MeasurePill(LockState.Locked, 1f, cameras: true).Width > OverlayPainter.MeasurePill(LockState.Locked, 1f).Width);
+    }
+
+    /// <summary>
+    /// The pill is sized to its text at every scale: the text (white ink) never reaches into the right-hand
+    /// padding, and no space is wasted either (the text ends where the padding starts, within a pixel or two).
+    /// GDI+ draws small grid-fitted text narrower than it measures it, so this failed at 100 % before the pill
+    /// measured its drawn text.
+    /// </summary>
+    [Theory]
+    [InlineData(1f, false)]
+    [InlineData(1f, true)]
+    [InlineData(1.25f, true)]
+    [InlineData(1.5f, true)]
+    [InlineData(1.75f, true)]
+    [InlineData(2f, true)]
+    [InlineData(2.5f, true)]
+    [InlineData(3f, true)]
+    public void PillFitsItsTextAtEveryScale(float scale, bool cameras)
+    {
+        using Bitmap bitmap = OverlayPainter.RenderPill(LockState.Locked, scale, out int padding, cameras);
+        Size body = OverlayPainter.MeasurePill(LockState.Locked, scale, cameras);
+
+        int rightmostInk = -1;
+        for (int x = padding; x < padding + body.Width; x++)
+        {
+            for (int y = padding + (body.Height / 4); y < padding + (body.Height * 3 / 4); y++)
+            {
+                Color pixel = bitmap.GetPixel(x, y);
+                if (pixel.A == 255 && pixel.G > 110 && pixel.B > 110)
+                {
+                    rightmostInk = Math.Max(rightmostInk, x);
+                }
+            }
+        }
+
+        int textEndsBefore = padding + body.Width - OverlayLayout.Scale(13f, scale); // the right padding
+        Assert.InRange(rightmostInk, textEndsBefore - 3, textEndsBefore + 1);
     }
 
     [Fact]

@@ -20,13 +20,14 @@ internal sealed partial class CoreJsonContext : JsonSerializerContext
 {
 }
 
-/// <summary>Single-line JSON for history.jsonl.</summary>
+/// <summary>Single-line JSON for history.jsonl and lock-events.jsonl.</summary>
 [JsonSourceGenerationOptions(
     WriteIndented = false,
     UseStringEnumConverter = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(UsageRecord))]
+[JsonSerializable(typeof(LockEventRecord))]
 internal sealed partial class CoreJsonLineContext : JsonSerializerContext
 {
 }

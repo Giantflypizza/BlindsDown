@@ -9,16 +9,20 @@ namespace BlindsDown.Tests.Core.Locking;
 /// Random histories of locks, unlocks, plugging, unplugging, disabling, other apps changing the mute,
 /// missed notifications, clean exits and crashes at random points (including during recovery).
 /// A simple model tracks what each device's mute should be: its state before any lock, updated only
-/// by changes made by others while unlocked (or to excluded devices, which BlindsDown never guards).
+/// by changes made by others while unlocked (or to excluded devices, which BlindsDown never guards),
+/// and whether it should be on or off: only ever changed by the user (or another app).
 /// Invariants:
-///  * while unlocked, every device that can be read has exactly the mute the model expects;
-///  * while locked, every usable, readable, non-excluded device is muted and the lock is complete;
-///  * excluded and disabled devices are never touched;
+///  * while unlocked, every device that can be read has exactly the mute the model expects, and every
+///    device that is there is on or off as the model expects;
+///  * while locked, every usable, readable, non-excluded device is muted and the lock is complete; with
+///    the stronger lock, every physical one of them is off too;
+///  * excluded and disabled devices are never touched, virtual ones never turned off;
 ///  * at the end, with everything plugged back in, every device matches the model.
 /// </summary>
 public sealed class LockEnginePropertyTests
 {
     private const int Sequences = 500;
+    private const int StrongerSequences = 300;
     private const int StepsPerSequence = 60;
 
     [Fact]
@@ -26,7 +30,16 @@ public sealed class LockEnginePropertyTests
     {
         for (int seed = 1; seed <= Sequences; seed++)
         {
-            new Simulation(seed).Run();
+            new Simulation(seed, stronger: false).Run();
+        }
+    }
+
+    [Fact]
+    public void RandomHistoriesWithTheStrongerLockAlwaysEndWhereTheUserLeftTheDevices()
+    {
+        for (int seed = 1; seed <= StrongerSequences; seed++)
+        {
+            new Simulation(seed, stronger: true).Run();
         }
     }
 
@@ -42,13 +55,18 @@ public sealed class LockEnginePropertyTests
         Bluetooth,
     }
 
-    private sealed class Simulation(int seed)
+    /// <summary>One random history. With <paramref name="stronger"/>, locks also turn microphones off, some
+    /// devices are virtual, and devices that are off can be unplugged too. (Without it, the random draws are
+    /// exactly those of the mute-only histories.)</summary>
+    private sealed class Simulation(int seed, bool stronger)
     {
         private readonly Random _rng = new(seed);
-        private readonly LockWorld _world = new();
+        private readonly LockWorld _world = new() { Settings = { DisableMicsInWindows = stronger } };
         private readonly Dictionary<string, bool> _expected = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, bool> _expectedOff = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, Kind> _kinds = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _excluded = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _virtual = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<string> _trace = [];
         private int _nextId;
 
@@ -103,9 +121,19 @@ public sealed class LockEnginePropertyTests
         private void Step()
         {
             List<FakeMic> present = Mics.All.Where(m => m.State is EndpointState.Active).ToList();
-            List<FakeMic> away = Mics.All.Where(m => m.State is EndpointState.NotPresent or EndpointState.Unplugged).ToList();
+            List<FakeMic> away = stronger
+                ? Mics.All.Where(m => m.Presence is EndpointState.NotPresent or EndpointState.Unplugged).ToList()
+                : Mics.All.Where(m => m.State is EndpointState.NotPresent or EndpointState.Unplugged).ToList();
+            List<FakeMic> pluggedIn = stronger ? Mics.All.Where(m => m.Presence == EndpointState.Active).ToList() : present;
             List<FakeMic> disabled = Mics.All.Where(m => m.State is EndpointState.Disabled).ToList();
             List<FakeMic> readable = Mics.All.Where(m => m.IsReadable).ToList();
+
+            // While a stronger lock is on, the user only turns off what BlindsDown leaves on (excluded and virtual
+            // microphones): turning off one that BlindsDown just turned off again can't be told apart from
+            // BlindsDown's own change.
+            List<FakeMic> userCanTurnOff = stronger && Engine.HasLock
+                ? present.Where(m => _excluded.Contains(m.Id) || _virtual.Contains(m.Id)).ToList()
+                : present;
 
             switch (_rng.Next(100))
             {
@@ -117,8 +145,8 @@ public sealed class LockEnginePropertyTests
                     Log("Unlock");
                     Engine.Unlock();
                     break;
-                case < 40 when present.Count > 0:
-                    FakeMic leaving = Pick(present);
+                case < 40 when pluggedIn.Count > 0:
+                    FakeMic leaving = Pick(pluggedIn);
                     EndpointState to = _kinds[leaving.Id] == Kind.Usb ? EndpointState.NotPresent : EndpointState.Unplugged;
                     Log($"Unplug {leaving.Id} -> {to}");
                     Mics.Unplug(leaving.Id, to);
@@ -128,15 +156,18 @@ public sealed class LockEnginePropertyTests
                     Log($"Plug {back.Id}");
                     Mics.Plug(back.Id);
                     break;
-                case < 56 when present.Count > 0:
-                    FakeMic off = Pick(present);
+                case < 56 when userCanTurnOff.Count > 0:
+                    FakeMic off = Pick(userCanTurnOff);
                     Log($"Disable {off.Id}");
                     Mics.Disable(off.Id);
+                    _expectedOff[off.Id] = true;
                     break;
                 case < 60 when disabled.Count > 0:
+                    // The user turning a microphone on, or (one BlindsDown turned off) something fighting the lock.
                     FakeMic on = Pick(disabled);
                     Log($"Enable {on.Id}");
                     Mics.Enable(on.Id);
+                    _expectedOff[on.Id] = false;
                     break;
                 case < 80 when readable.Count > 0:
                     FakeMic target = Pick(readable);
@@ -287,6 +318,9 @@ public sealed class LockEnginePropertyTests
                 foreach (FakeMic mic in Mics.All.Where(m => m.IsReadable && !_excluded.Contains(m.Id)))
                 {
                     Assert.True(mic.Muted, Describe($"{mic} is not muted while locked"));
+
+                    // Readable means on: with the stronger lock, only virtual microphones stay on.
+                    Assert.True(!stronger || _virtual.Contains(mic.Id), Describe($"{mic} is on while locked"));
                 }
             }
             else
@@ -295,12 +329,22 @@ public sealed class LockEnginePropertyTests
                 {
                     Assert.True(mic.Muted == _expected[mic.Id], Describe($"{mic} should be {(_expected[mic.Id] ? "muted" : "unmuted")}"));
                 }
+
+                foreach (FakeMic mic in Mics.All.Where(m => m.State != EndpointState.NotPresent))
+                {
+                    Assert.True(mic.IsOff == _expectedOff[mic.Id], Describe($"{mic} should be {(_expectedOff[mic.Id] ? "off" : "on")}"));
+                }
             }
 
             foreach ((string id, bool _, EndpointState state) in Mics.SetMuteLog)
             {
                 Assert.False(_excluded.Contains(id), Describe($"excluded {id} was touched"));
                 Assert.True(state is EndpointState.Active or EndpointState.Unplugged, Describe($"{id} was touched while {state}"));
+            }
+
+            foreach ((string id, bool _) in Mics.SetEndpointEnabledLog)
+            {
+                Assert.False(_excluded.Contains(id) || _virtual.Contains(id), Describe($"{id} was turned off or on"));
             }
         }
 
@@ -312,10 +356,28 @@ public sealed class LockEnginePropertyTests
                 Engine.Unlock();
             }
 
+            if (stronger)
+            {
+                // Everything comes back; what is off stays off until BlindsDown (or the user) turns it on.
+                foreach (FakeMic mic in Mics.All.Where(m => m.Presence != EndpointState.Active))
+                {
+                    Log($"Final plug {mic.Id}");
+                    Mics.Plug(mic.Id);
+                }
+
+                Settle();
+                foreach (FakeMic mic in Mics.All)
+                {
+                    Assert.True(mic.IsOff == _expectedOff[mic.Id], Describe($"{mic} should be {(_expectedOff[mic.Id] ? "off" : "on")} at the end"));
+                }
+            }
+
+            // The user turns everything on, so that every mute can be checked.
             foreach (FakeMic mic in Mics.All.Where(m => m.State != EndpointState.Active))
             {
                 Log($"Final plug {mic.Id}");
                 Mics.SetState(mic.Id, EndpointState.Active);
+                _expectedOff[mic.Id] = false;
             }
 
             Settle();
@@ -335,16 +397,33 @@ public sealed class LockEnginePropertyTests
                 _ => EndpointState.Disabled,
             };
 
-            Mics.Add(id, muted, state, unreadableWhenUnplugged: kind == Kind.Bluetooth, hardwareMute: _rng.Next(2) == 0, notify: notify);
+            bool isVirtual = stronger && _rng.Next(5) == 0;
+            if (isVirtual)
+            {
+                // A software device: it comes and goes like a USB one.
+                _virtual.Add(id);
+                kind = Kind.Usb;
+                state = state == EndpointState.Unplugged ? EndpointState.NotPresent : state;
+            }
+
+            Mics.Add(
+                id,
+                muted,
+                state,
+                hardware: isVirtual ? $@"SWD\MMDEVAPI\{{0.0.1.00000000}}.{{{id}}}" : null,
+                unreadableWhenUnplugged: kind == Kind.Bluetooth,
+                hardwareMute: _rng.Next(2) == 0,
+                notify: notify);
             _kinds[id] = kind;
             _expected[id] = muted;
+            _expectedOff[id] = state == EndpointState.Disabled;
             if (_rng.Next(7) == 0)
             {
                 _excluded.Add(id);
                 _world.Exclude(id);
             }
 
-            Log($"Add {Mics[id]} {kind}{(_excluded.Contains(id) ? " excluded" : string.Empty)}");
+            Log($"Add {Mics[id]} {kind}{(isVirtual ? " virtual" : string.Empty)}{(_excluded.Contains(id) ? " excluded" : string.Empty)}");
         }
 
         private FakeMic Pick(List<FakeMic> mics) => mics[_rng.Next(mics.Count)];
@@ -352,8 +431,8 @@ public sealed class LockEnginePropertyTests
         private void Log(string what) => _trace.Add(what);
 
         private string Describe(string problem) =>
-            $"Seed {seed}: {problem}.{Environment.NewLine}Devices: {string.Join(", ", Mics.All)}{Environment.NewLine}"
-            + $"Expected: {string.Join(", ", _expected.Select(kv => $"{kv.Key}={(kv.Value ? "muted" : "unmuted")}"))}{Environment.NewLine}"
+            $"Seed {seed}{(stronger ? " (stronger lock)" : string.Empty)}: {problem}.{Environment.NewLine}Devices: {string.Join(", ", Mics.All)}{Environment.NewLine}"
+            + $"Expected: {string.Join(", ", _expected.Select(kv => $"{kv.Key}={(kv.Value ? "muted" : "unmuted")}{(_expectedOff[kv.Key] ? ",off" : string.Empty)}"))}{Environment.NewLine}"
             + $"Trace:{Environment.NewLine}  {string.Join(Environment.NewLine + "  ", _trace)}";
     }
 }

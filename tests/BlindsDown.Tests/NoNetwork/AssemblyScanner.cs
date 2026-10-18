@@ -47,6 +47,12 @@ internal sealed record CallSite(
     public override string ToString() => $"{Caller} --{Instruction} @IL_{ILOffset:x4}--> {Callee}";
 }
 
+/// <summary>
+/// One decoded IL instruction. <paramref name="Token"/> is the metadata token of a method, field, type or signature
+/// operand (nil for other operands); <paramref name="Targets"/> are the offsets a branch or switch can jump to.
+/// </summary>
+internal readonly record struct ILInstruction(int Offset, OpCode OpCode, EntityHandle Token, int[] Targets);
+
 /// <summary>A P/Invoke: a method whose body lives in a native DLL (DllImport, or the inner stub that LibraryImport generates).</summary>
 internal sealed record PInvokeImport(ScannedMember Method, MethodDefinitionHandle Handle, string Module, string EntryPoint)
 {
@@ -69,6 +75,7 @@ internal sealed class AssemblyScanner : IDisposable
 {
     private const string GeneratedCodeAttribute = "System.CodeDom.Compiler.GeneratedCodeAttribute";
     private const string LibraryImportGenerator = "Microsoft.Interop.LibraryImportGenerator";
+    private const string VoidType = "System.Void";
 
     /// <summary>
     /// Every IL opcode by its encoded value (0xFE-prefixed ones as 0xFExx). Built from
@@ -209,35 +216,186 @@ internal sealed class AssemblyScanner : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// True when code in another assembly can call the method without InternalsVisibleTo: it is public or protected,
+    /// and so is every type it is nested in.
+    /// </summary>
+    public bool IsVisibleOutsideAssembly(MethodDefinitionHandle handle)
+    {
+        MethodDefinition method = _md.GetMethodDefinition(handle);
+        MethodAttributes access = method.Attributes & MethodAttributes.MemberAccessMask;
+        if (access is not (MethodAttributes.Public or MethodAttributes.Family or MethodAttributes.FamORAssem))
+        {
+            return false;
+        }
+
+        for (TypeDefinitionHandle type = method.GetDeclaringType(); !type.IsNil; type = _md.GetTypeDefinition(type).GetDeclaringType())
+        {
+            TypeAttributes visibility = _md.GetTypeDefinition(type).Attributes & TypeAttributes.VisibilityMask;
+            if (visibility is not (TypeAttributes.Public or TypeAttributes.NestedPublic or TypeAttributes.NestedFamily or TypeAttributes.NestedFamORAssem))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The assemblies this one shares its internal code with ([assembly: InternalsVisibleTo]), by simple name.</summary>
+    public IEnumerable<string> InternalsVisibleTo()
+    {
+        if (!_md.IsAssembly)
+        {
+            yield break;
+        }
+
+        foreach (CustomAttributeHandle attributeHandle in _md.GetAssemblyDefinition().GetCustomAttributes())
+        {
+            CustomAttribute attribute = _md.GetCustomAttribute(attributeHandle);
+            if (AttributeTypeName(attribute) == "System.Runtime.CompilerServices.InternalsVisibleToAttribute"
+                && TryReadFirstStringArgument(attribute, out string? friend))
+            {
+                // "Name" or "Name, PublicKey=...".
+                yield return friend.Split(',')[0].Trim();
+            }
+        }
+    }
+
     /// <summary>Every method reference in every method body, found by decoding the IL instruction stream.</summary>
     public IReadOnlyList<CallSite> CallSites() => _callSites ??= DecodeAllCallSites();
+
+    /// <summary>The instructions of one method body, in order. Empty for a method without IL (abstract, extern,
+    /// P/Invoke or runtime-implemented).</summary>
+    public IReadOnlyList<ILInstruction> Instructions(MethodDefinitionHandle method)
+    {
+        MethodDefinition definition = _md.GetMethodDefinition(method);
+        return definition.RelativeVirtualAddress == 0
+            ? []
+            : Decode(method, _pe.GetMethodBody(definition.RelativeVirtualAddress).GetILReader());
+    }
+
+    /// <summary>
+    /// The offsets in one method body where control can arrive from somewhere other than the instruction before:
+    /// branch and switch targets, and the first instruction of every try block, handler and filter.
+    /// </summary>
+    public IReadOnlySet<int> JumpTargets(MethodDefinitionHandle method)
+    {
+        var targets = new HashSet<int>();
+        MethodDefinition definition = _md.GetMethodDefinition(method);
+        if (definition.RelativeVirtualAddress == 0)
+        {
+            return targets;
+        }
+
+        MethodBodyBlock body = _pe.GetMethodBody(definition.RelativeVirtualAddress);
+        foreach (ILInstruction instruction in Decode(method, body.GetILReader()))
+        {
+            targets.UnionWith(instruction.Targets);
+        }
+
+        foreach (ExceptionRegion region in body.ExceptionRegions)
+        {
+            targets.Add(region.TryOffset);
+            targets.Add(region.HandlerOffset);
+            if (region.Kind == ExceptionRegionKind.Filter)
+            {
+                targets.Add(region.FilterOffset);
+            }
+        }
+
+        return targets;
+    }
+
+    /// <summary>
+    /// How many values <paramref name="instruction"/> takes off the evaluation stack and how many it puts back.
+    /// Calls are counted from the called method's signature (the instance counts as a value); <paramref name="method"/>
+    /// is the method the instruction belongs to, which decides what "ret" takes.
+    /// </summary>
+    public (int Pops, int Pushes) StackEffect(MethodDefinitionHandle method, ILInstruction instruction)
+    {
+        OpCode op = instruction.OpCode;
+        if (op.StackBehaviourPop != StackBehaviour.Varpop && op.StackBehaviourPush != StackBehaviour.Varpush)
+        {
+            return (Count(op.StackBehaviourPop), Count(op.StackBehaviourPush));
+        }
+
+        if (op == OpCodes.Ret)
+        {
+            MethodSignature<string> own = _md.GetMethodDefinition(method).DecodeSignature(SignatureTypeNames.Instance, null);
+            return (own.ReturnType == VoidType ? 0 : 1, 0);
+        }
+
+        MethodSignature<string> signature = CalledSignature(instruction.Token);
+        int parameters = signature.ParameterTypes.Length;
+        int instance = signature.Header.IsInstance && !signature.Header.HasExplicitThis ? 1 : 0;
+        int result = signature.ReturnType == VoidType ? 0 : 1;
+        if (op == OpCodes.Newobj)
+        {
+            return (parameters, 1);
+        }
+
+        // calli also takes the function pointer, on top of the arguments.
+        return op == OpCodes.Calli ? (parameters + instance + 1, result) : (parameters + instance, result);
+    }
+
+    /// <summary>The field a field instruction (ldfld, stfld, ldflda, ...) refers to.</summary>
+    public ScannedMember DescribeField(EntityHandle token) => Describe(token);
 
     public ScannedMember Describe(MethodDefinitionHandle handle) => Describe((EntityHandle)handle);
 
     public void Dispose() => _pe.Dispose();
+
+    private static int Count(StackBehaviour behaviour) => behaviour switch
+    {
+        StackBehaviour.Pop0 or StackBehaviour.Push0 => 0,
+        StackBehaviour.Pop1 or StackBehaviour.Popi or StackBehaviour.Popref => 1,
+        StackBehaviour.Push1 or StackBehaviour.Pushi or StackBehaviour.Pushi8 or StackBehaviour.Pushr4 or StackBehaviour.Pushr8
+            or StackBehaviour.Pushref => 1,
+        StackBehaviour.Pop1_pop1 or StackBehaviour.Popi_pop1 or StackBehaviour.Popi_popi or StackBehaviour.Popi_popi8
+            or StackBehaviour.Popi_popr4 or StackBehaviour.Popi_popr8 or StackBehaviour.Popref_pop1 or StackBehaviour.Popref_popi
+            or StackBehaviour.Push1_push1 => 2,
+        StackBehaviour.Popi_popi_popi or StackBehaviour.Popref_popi_popi or StackBehaviour.Popref_popi_popi8
+            or StackBehaviour.Popref_popi_popr4 or StackBehaviour.Popref_popi_popr8 or StackBehaviour.Popref_popi_popref
+            or StackBehaviour.Popref_popi_pop1 => 3,
+        _ => throw new InvalidDataException($"Unexpected IL stack behaviour {behaviour}."),
+    };
+
+    private MethodSignature<string> CalledSignature(EntityHandle token)
+    {
+        if (token.Kind == HandleKind.MethodSpecification)
+        {
+            token = _md.GetMethodSpecification((MethodSpecificationHandle)token).Method;
+        }
+
+        return token.Kind switch
+        {
+            HandleKind.MethodDefinition => _md.GetMethodDefinition((MethodDefinitionHandle)token).DecodeSignature(SignatureTypeNames.Instance, null),
+            HandleKind.MemberReference => _md.GetMemberReference((MemberReferenceHandle)token).DecodeMethodSignature(SignatureTypeNames.Instance, null),
+            HandleKind.StandaloneSignature => _md.GetStandaloneSignature((StandaloneSignatureHandle)token).DecodeMethodSignature(SignatureTypeNames.Instance, null),
+            _ => throw new InvalidDataException($"{FileName}: a call names a {token.Kind}, not a method."),
+        };
+    }
 
     private List<CallSite> DecodeAllCallSites()
     {
         var sites = new List<CallSite>();
         foreach (MethodDefinitionHandle callerHandle in _md.MethodDefinitions)
         {
-            MethodDefinition caller = _md.GetMethodDefinition(callerHandle);
-
-            // RVA 0: abstract, extern, P/Invoke and runtime-implemented methods have no IL.
-            if (caller.RelativeVirtualAddress == 0)
+            foreach (ILInstruction instruction in Instructions(callerHandle))
             {
-                continue;
+                if (instruction.OpCode.OperandType is OperandType.InlineMethod or OperandType.InlineTok)
+                {
+                    AddCallSite(callerHandle, instruction.Token, instruction.OpCode, instruction.Offset, sites);
+                }
             }
-
-            MethodBodyBlock body = _pe.GetMethodBody(caller.RelativeVirtualAddress);
-            DecodeBody(callerHandle, body.GetILReader(), sites);
         }
 
         return sites;
     }
 
-    private void DecodeBody(MethodDefinitionHandle callerHandle, BlobReader il, List<CallSite> sites)
+    private List<ILInstruction> Decode(MethodDefinitionHandle method, BlobReader il)
     {
+        var instructions = new List<ILInstruction>();
         while (il.RemainingBytes > 0)
         {
             int offset = il.Offset;
@@ -250,25 +408,48 @@ internal sealed class AssemblyScanner : IDisposable
             if (!OpCodesByValue.TryGetValue(value, out OpCode opCode))
             {
                 throw new InvalidDataException(
-                    $"{FileName}: unknown IL opcode 0x{value:x} at IL_{offset:x4} in {Describe(callerHandle)}. The scanner must understand every instruction.");
+                    $"{FileName}: unknown IL opcode 0x{value:x} at IL_{offset:x4} in {Describe(method)}. The scanner must understand every instruction.");
             }
 
+            EntityHandle token = default;
+            int[] targets = [];
             switch (opCode.OperandType)
             {
                 case OperandType.InlineMethod:
                 case OperandType.InlineTok:
-                    EntityHandle target = MetadataTokens.EntityHandle(il.ReadInt32());
-                    AddCallSite(callerHandle, target, opCode, offset, sites);
+                case OperandType.InlineField:
+                case OperandType.InlineType:
+                case OperandType.InlineSig:
+                    token = MetadataTokens.EntityHandle(il.ReadInt32());
+                    break;
+                case OperandType.ShortInlineBrTarget:
+                    int shortDelta = il.ReadSByte();
+                    targets = [il.Offset + shortDelta];
+                    break;
+                case OperandType.InlineBrTarget:
+                    int delta = il.ReadInt32();
+                    targets = [il.Offset + delta];
                     break;
                 case OperandType.InlineSwitch:
-                    int targets = il.ReadInt32();
-                    il.Offset += 4 * targets;
+                    // Jump offsets count from the end of the whole instruction, after the table.
+                    int[] deltas = new int[il.ReadInt32()];
+                    for (int i = 0; i < deltas.Length; i++)
+                    {
+                        deltas[i] = il.ReadInt32();
+                    }
+
+                    int end = il.Offset;
+                    targets = [.. deltas.Select(d => end + d)];
                     break;
                 default:
                     il.Offset += OperandSize(opCode.OperandType);
                     break;
             }
+
+            instructions.Add(new ILInstruction(offset, opCode, token, targets));
         }
+
+        return instructions;
     }
 
     private void AddCallSite(MethodDefinitionHandle callerHandle, EntityHandle target, OpCode opCode, int offset, List<CallSite> sites)
@@ -321,6 +502,10 @@ internal sealed class AssemblyScanner : IDisposable
                 MethodDefinition definition = _md.GetMethodDefinition((MethodDefinitionHandle)handle);
                 MethodSignature<string> definitionSignature = definition.DecodeSignature(SignatureTypeNames.Instance, null);
                 member = new ScannedMember(TypeName(definition.GetDeclaringType()), _md.GetString(definition.Name), string.Join(",", definitionSignature.ParameterTypes));
+                break;
+            case HandleKind.FieldDefinition:
+                FieldDefinition field = _md.GetFieldDefinition((FieldDefinitionHandle)handle);
+                member = new ScannedMember(TypeName(field.GetDeclaringType()), _md.GetString(field.Name), null);
                 break;
             case HandleKind.MemberReference:
                 MemberReference reference = _md.GetMemberReference((MemberReferenceHandle)handle);
@@ -388,8 +573,8 @@ internal sealed class AssemblyScanner : IDisposable
     };
 
     /// <summary>Reads the first constructor argument of an attribute whose constructor starts with a string
-    /// (GuidAttribute, GeneratedCodeAttribute). Blob layout: prolog 0x0001, then a SerString.</summary>
-    private bool TryReadFirstStringArgument(CustomAttribute attribute, out string? value)
+    /// (GuidAttribute, GeneratedCodeAttribute, InternalsVisibleToAttribute). Blob layout: prolog 0x0001, then a SerString.</summary>
+    private bool TryReadFirstStringArgument(CustomAttribute attribute, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? value)
     {
         value = null;
         BlobReader blob = _md.GetBlobReader(attribute.Value);

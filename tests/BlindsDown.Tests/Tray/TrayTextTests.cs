@@ -101,6 +101,68 @@ public class TrayTextTests
         Assert.True(lines[0].Length <= TrayText.MaxMenuLineLength);
     }
 
+    [Fact]
+    public void CamerasAreMentionedWhileOneIsActuallyTurnedOff()
+    {
+        LockStatusInfo locked = new(LockState.Locked, [Mic(), Camera(DeviceProtection.DeviceDisabled)], []);
+        LockStatusInfo cameraNotOff = new(LockState.Locked, [Mic(), Camera(DeviceProtection.None)], []);
+
+        Assert.True(TrayText.CamerasLocked(locked));
+        Assert.False(TrayText.CamerasLocked(cameraNotOff));
+        Assert.Equal("BlindsDown: microphones and cameras locked", TrayText.Tooltip(locked, []));
+        Assert.Equal("Microphones and cameras locked", TrayText.Headline(LockState.Locked, TrayText.MentionsCameras(locked, cameraLockOn: true)));
+
+        // Never claims more than is true: camera lock is on, but no camera is turned off.
+        Assert.Equal("BlindsDown: microphones locked", TrayText.Tooltip(cameraNotOff, [], cameraLockOn: true));
+    }
+
+    [Fact]
+    public void WhileUnlockedTheCameraLockSettingDecides()
+    {
+        Assert.True(TrayText.MentionsCameras(LockStatusInfo.Unlocked, cameraLockOn: true));
+        Assert.False(TrayText.MentionsCameras(LockStatusInfo.Unlocked, cameraLockOn: false));
+        Assert.Equal("BlindsDown: microphones and cameras unlocked", TrayText.Tooltip(LockStatusInfo.Unlocked, [], cameraLockOn: true));
+        Assert.Equal("&Lock microphones and cameras", TrayText.ToggleLabel(LockState.Unlocked, cameras: true));
+        Assert.Equal("&Unlock microphones and cameras", TrayText.ToggleLabel(LockState.PartiallyLocked, cameras: true));
+    }
+
+    [Theory]
+    [InlineData(LockState.Locked, "Microphones and cameras locked")]
+    [InlineData(LockState.PartiallyLocked, "Microphones and cameras partially locked")]
+    [InlineData(LockState.Locking, "Locking microphones and cameras…")]
+    [InlineData(LockState.Unlocking, "Unlocking microphones and cameras…")]
+    [InlineData(LockState.Unlocked, "Microphones and cameras unlocked")]
+    public void HeadlineWithCameras(LockState state, string expected) =>
+        Assert.Equal(expected, TrayText.Headline(state, cameras: true));
+
+    [Fact]
+    public void TooltipWithCamerasNeverExceedsTheShellLimit()
+    {
+        UsageSession[] active =
+        [
+            .. Enumerable.Range(0, 30).Select(i => Session($"Some Very Long Application Name Number {i}", i % 2 == 0 ? CaptureKind.Microphone : CaptureKind.Camera)),
+        ];
+        LockStatusInfo status = new(LockState.PartiallyLocked, [Camera(DeviceProtection.DeviceDisabled)], [new string('x', 300), "b"]);
+
+        string tip = TrayText.Tooltip(status, active, cameraLockOn: true);
+
+        Assert.True(tip.Length <= TrayText.MaxTooltipLength, $"{tip.Length} characters");
+        Assert.StartsWith("BlindsDown: microphones and cameras partially locked (2 problems)", tip, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProblemLineSpeaksOfDevicesWhenCamerasAreInvolved()
+    {
+        Assert.Equal("Some microphones are not protected", TrayText.ProblemMenuLine(new LockStatusInfo(LockState.PartiallyLocked, [Mic()], [])));
+        Assert.Equal("Some devices are not protected", TrayText.ProblemMenuLine(new LockStatusInfo(LockState.PartiallyLocked, [Mic(), Camera(DeviceProtection.None)], [])));
+    }
+
+    private static DeviceLockInfo Mic() =>
+        new("{m}", "Mic", "mic|m", DeviceKind.Microphone, false, false, DeviceProtection.SoftwareMute, null);
+
+    private static DeviceLockInfo Camera(DeviceProtection protection) =>
+        new(@"USB\CAM\1", "Camera", "cam|USB\\CAM|CAMERA", DeviceKind.Camera, false, false, protection, null, CameraType.Color);
+
     private static LockStatusInfo Status(LockState state, params string[] problems) => new(state, [], problems);
 
     private static UsageSession Session(string app, CaptureKind kind, string? via = null, bool ended = false) => new()

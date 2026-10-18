@@ -26,10 +26,15 @@ internal sealed class ComRef<T> : IDisposable
 
     public T Value => _value ?? throw new ObjectDisposedException(typeof(T).Name);
 
+    /// <summary>
+    /// Releases the wrapper's reference. A pointer to a COM wrapper of a managed object (the runtime hands back the
+    /// object itself for those, e.g. tests passing fakes through COM) has no runtime wrapper to release: the
+    /// reference taken for it was already returned in <see cref="ComRef.TryTake{T}"/>.
+    /// </summary>
     public void Dispose()
     {
         T? value = Interlocked.Exchange(ref _value, null);
-        if (value is not null)
+        if (value is not null && Marshal.IsComObject(value))
         {
             _ = Marshal.ReleaseComObject(value);
         }
@@ -68,7 +73,13 @@ internal static class ComRef
             return new ComRef<T>(value);
         }
 
-        _ = Marshal.ReleaseComObject(wrapper);
+        // Like ComRef<T>.Dispose: a managed object behind the pointer has no runtime wrapper to release (and
+        // ReleaseComObject would throw for it).
+        if (Marshal.IsComObject(wrapper))
+        {
+            _ = Marshal.ReleaseComObject(wrapper);
+        }
+
         return null;
     }
 

@@ -17,6 +17,17 @@ coverage*.xml
 # Local runtime data never belongs in the repo
 *.log
 
+# Snapshots and self-test reports list the real devices of the PC they ran on (docs/TESTING.md names these files)
+/snapshot*.txt
+/selftest*.txt
+/start*.txt
+/end*.txt
+/before*.txt
+/after*.txt
+
+# Local tooling notes and worktrees (they contain local paths and device lists)
+.claude/
+
 # OS
 Thumbs.db
 Desktop.ini

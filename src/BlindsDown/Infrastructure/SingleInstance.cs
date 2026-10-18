@@ -13,6 +13,9 @@ internal enum InstanceCommand
 /// (e.g. "BlindsDown.exe --toggle") forward a command to the running one via named events.
 /// Local\ objects are per session and created with the user's default security, so only this user's
 /// processes in this session can see them.
+/// A command is only ever reported as delivered while its event exists, and the event exists only while the tray app
+/// takes commands: a command-line mode never creates them, and an exiting tray app closes them. Otherwise the sender
+/// sees that nobody listens, waits for this instance to end, and then does the work itself (see Program).
 /// </summary>
 internal sealed class SingleInstance : IDisposable
 {
@@ -23,6 +26,7 @@ internal sealed class SingleInstance : IDisposable
     private readonly List<RegisteredWaitHandle> _waits = [];
     private readonly object _gate = new();
     private bool _listening;
+    private bool _stopped;
     private volatile bool _disposed;
 
     private SingleInstance(Mutex mutex, Dictionary<InstanceCommand, EventWaitHandle> events)
@@ -34,15 +38,19 @@ internal sealed class SingleInstance : IDisposable
     /// <summary>Raised on a thread-pool thread when another launch forwarded a command.</summary>
     public event Action<InstanceCommand>? CommandReceived;
 
-    /// <summary>Returns the instance if this is the first BlindsDown in the session, otherwise null.</summary>
-    public static SingleInstance? TryAcquire() => TryAcquire(DefaultNamePrefix);
+    /// <summary>Returns the instance if this is the first BlindsDown in the session, otherwise null. Only the tray app
+    /// <paramref name="takesCommands"/>: a command-line mode (--restore, --selftest) holds just the mutex, so a launch
+    /// meanwhile is never told that its command was delivered.</summary>
+    public static SingleInstance? TryAcquire(bool takesCommands) => TryAcquire(DefaultNamePrefix, takesCommands);
 
-    /// <summary>Forwards a command to the running instance. Returns false if none is running.</summary>
+    /// <summary>Forwards a command to the running instance. Returns false when none is running, or when the running one
+    /// takes no commands (it is exiting, or it is a command-line mode): the command was not delivered then.</summary>
     public static bool SendToRunningInstance(InstanceCommand command) => SendToRunningInstance(DefaultNamePrefix, command);
 
     /// <param name="namePrefix">Kernel object name prefix; tests pass a unique one so they never touch a
     /// real running BlindsDown.</param>
-    internal static SingleInstance? TryAcquire(string namePrefix)
+    /// <param name="takesCommands">False: only the mutex, no command events (see <see cref="TryAcquire(bool)"/>).</param>
+    internal static SingleInstance? TryAcquire(string namePrefix, bool takesCommands = true)
     {
         Mutex? mutex = null;
         var events = new Dictionary<InstanceCommand, EventWaitHandle>();
@@ -57,9 +65,12 @@ internal sealed class SingleInstance : IDisposable
             }
 
             // Created now (not in Listen) so a command sent during startup waits in its auto-reset event.
-            foreach (InstanceCommand command in Enum.GetValues<InstanceCommand>())
+            if (takesCommands)
             {
-                events[command] = new EventWaitHandle(false, EventResetMode.AutoReset, EventName(namePrefix, command));
+                foreach (InstanceCommand command in Enum.GetValues<InstanceCommand>())
+                {
+                    events[command] = new EventWaitHandle(false, EventResetMode.AutoReset, EventName(namePrefix, command));
+                }
             }
 
             var instance = new SingleInstance(mutex, events);
@@ -87,7 +98,8 @@ internal sealed class SingleInstance : IDisposable
     internal static bool SendToRunningInstance(string namePrefix, InstanceCommand command)
     {
         // The running instance creates its events just after its mutex; retry briefly if a launch lands
-        // in that gap (or while it is still starting) instead of reporting "not running".
+        // in that gap (or while it is still starting) instead of reporting "not running". An instance that
+        // takes no commands has none, so after the retries this reports "not delivered".
         for (int attempt = 0; attempt < 10; attempt++)
         {
             try
@@ -119,12 +131,12 @@ internal sealed class SingleInstance : IDisposable
         return false;
     }
 
-    /// <summary>Begins listening for forwarded commands.</summary>
+    /// <summary>Begins listening for forwarded commands. Does nothing after <see cref="StopListening"/>.</summary>
     public void Listen()
     {
         lock (_gate)
         {
-            if (_listening || _disposed)
+            if (_listening || _stopped || _disposed)
             {
                 return;
             }
@@ -135,6 +147,61 @@ internal sealed class SingleInstance : IDisposable
                 _waits.Add(ThreadPool.RegisterWaitForSingleObject(handle, OnSignaled, command, Timeout.Infinite, executeOnlyOnce: false));
             }
         }
+    }
+
+    /// <summary>
+    /// Stops taking commands for good but keeps this instance the only one (the mutex): called when BlindsDown starts
+    /// exiting, so a command sent during the last seconds (a plain start, --toggle, --lock, --unlock or --restore) isn't
+    /// lost. The command events are closed, so the sender sees that nobody listens instead of being told its command was
+    /// delivered; it waits for this process to end, and then does the work itself. Works with or without a prior
+    /// <see cref="Listen"/>. Returns the commands that were sent in the last moment, after the last one was handed on
+    /// but before the events closed: their senders were told they were delivered, so the caller can at least log them.
+    /// </summary>
+    public IReadOnlyList<InstanceCommand> StopListening()
+    {
+        List<RegisteredWaitHandle> waits;
+        lock (_gate)
+        {
+            if (_disposed || _stopped)
+            {
+                return [];
+            }
+
+            _stopped = true;
+            _listening = false;
+            waits = [.. _waits];
+            _waits.Clear();
+        }
+
+        // Waits for callbacks already running (they only hand the command on), so a signal is either handed on or still set.
+        foreach (RegisteredWaitHandle wait in waits)
+        {
+            using var done = new ManualResetEvent(false);
+            if (wait.Unregister(done))
+            {
+                done.WaitOne(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        var late = new List<InstanceCommand>();
+        foreach ((InstanceCommand command, EventWaitHandle handle) in _events)
+        {
+            try
+            {
+                if (handle.WaitOne(0))
+                {
+                    late.Add(command);
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Closed already.
+            }
+
+            handle.Dispose();
+        }
+
+        return late;
     }
 
     public void Dispose()

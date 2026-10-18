@@ -22,5 +22,12 @@ public sealed class AppPaths
 
     public string HistoryFile => Path.Combine(DataDirectory, "history.jsonl");
 
+    /// <summary>Lock and unlock events (when, how, from where), shown in the Activity timeline.</summary>
+    public string LockEventsFile => Path.Combine(DataDirectory, "lock-events.jsonl");
+
+    /// <summary>The newest camera helper change seen, and the IDs of this user's own helper requests, so a change by
+    /// another program is noticed even when it happened while BlindsDown wasn't running.</summary>
+    public string HelperStateFile => Path.Combine(DataDirectory, "helper-state.txt");
+
     public string LogFile => Path.Combine(DataDirectory, "blindsdown.log");
 }

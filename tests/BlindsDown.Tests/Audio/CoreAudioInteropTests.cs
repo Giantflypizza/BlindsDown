@@ -26,10 +26,10 @@ public class CoreAudioInteropTests
         var value = new PropVariant
         {
             VarType = PropVariant.VtLpwstr,
-            Pointer = Marshal.StringToCoTaskMemUni("Microphone (Arctis Nova Pro Wireless)"),
+            Pointer = Marshal.StringToCoTaskMemUni("Microphone (USB Headset)"),
         };
 
-        Assert.Equal("Microphone (Arctis Nova Pro Wireless)", value.AsString());
+        Assert.Equal("Microphone (USB Headset)", value.AsString());
         Assert.Null(value.AsUInt32());
         Assert.Null(value.AsBoolean());
         Assert.Null(value.AsGuid());
@@ -90,7 +90,7 @@ public class CoreAudioInteropTests
     }
 
     [Theory]
-    [InlineData(@"{1}.USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000", @"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000")]
+    [InlineData(@"{1}.USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000", @"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000")]
     [InlineData(@"{2}.ROOT\MEDIA\0001", @"ROOT\MEDIA\0001")]
     [InlineData(@"{1}.SWD\MMDEVAPI\{0.0.1.00000000}.{9f3c5a1e}", @"SWD\MMDEVAPI\{0.0.1.00000000}.{9f3c5a1e}")]
     [InlineData(@"  {1}.HDAUDIO\FUNC_01&VEN_10EC&DEV_0897\4&2B7A3F&0&0001  ", @"HDAUDIO\FUNC_01&VEN_10EC&DEV_0897\4&2B7A3F&0&0001")]
@@ -110,7 +110,7 @@ public class CoreAudioInteropTests
     [Theory]
     [InlineData(@"{1}.ROOT\MEDIA\0001", true)]
     [InlineData(@"{1}.SWD\MMDEVAPI\x", true)]
-    [InlineData(@"{1}.USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000", false)]
+    [InlineData(@"{1}.USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000", false)]
     [InlineData(@"{1}.HDAUDIO\FUNC_01&VEN_10EC\4&1", false)]
     public void ParsedControllerIdFeedsTheVirtualCheck(string raw, bool isVirtual) =>
         Assert.Equal(isVirtual, DeviceIds.IsVirtualHardware(EndpointReader.ParseControllerDeviceId(raw)));

@@ -31,6 +31,7 @@ internal sealed class TrayController : IDisposable
     private readonly SynchronizationContext? _ui;
 
     private LockStatusInfo _status = LockStatusInfo.Unlocked;
+    private bool _cameraLockOn;
     private Hotkey _hotkey = Hotkey.Default;
     private IReadOnlyList<UsageSession> _active = [];
     private Icon? _icon;
@@ -85,6 +86,9 @@ internal sealed class TrayController : IDisposable
 
     public event Action? ExitRequested;
 
+    /// <summary>The tray menu, so tests can check and render its status lines without opening it.</summary>
+    internal ContextMenuStrip Menu => _menu;
+
     /// <summary>Shows the icon. Call once after construction.</summary>
     public void Show()
     {
@@ -99,8 +103,13 @@ internal sealed class TrayController : IDisposable
         _watchdog.Start();
     }
 
-    /// <summary>Updates icon, tooltip and menu to match the lock state.</summary>
-    public void SetStatus(LockStatusInfo status, Hotkey hotkey)
+    /// <summary>
+    /// Updates icon, tooltip and menu to match the lock state. <paramref name="status"/> may include the camera
+    /// helper's devices: while a camera is turned off (<see cref="DeviceProtection.DeviceDisabled"/>) the menu
+    /// header and tooltip say "Microphones and cameras locked". <paramref name="cameraLockOn"/>: the helper works
+    /// and "Lock cameras" is on, so while unlocked the menu offers "Lock microphones and cameras".
+    /// </summary>
+    public void SetStatus(LockStatusInfo status, Hotkey hotkey, bool cameraLockOn = false)
     {
         ArgumentNullException.ThrowIfNull(status);
         if (_disposed)
@@ -110,6 +119,7 @@ internal sealed class TrayController : IDisposable
 
         _status = status;
         _hotkey = hotkey;
+        _cameraLockOn = cameraLockOn;
         RefreshIcon();
         RefreshTooltip();
         RefreshMenu();
@@ -253,13 +263,14 @@ internal sealed class TrayController : IDisposable
         }
     }
 
-    private void RefreshTooltip() => _notifyIcon.Text = TrayText.Tooltip(_status, _active);
+    private void RefreshTooltip() => _notifyIcon.Text = TrayText.Tooltip(_status, _active, _cameraLockOn);
 
     private void RefreshMenu()
     {
         LockState state = _status.State;
+        bool cameras = TrayText.MentionsCameras(_status, _cameraLockOn);
         EnsureBoldFont();
-        _headline.Text = TrayText.Headline(state);
+        _headline.Text = TrayText.Headline(state, cameras);
         SetHeadlineImage(state);
 
         string? problem = TrayText.ProblemMenuLine(_status);
@@ -273,7 +284,7 @@ internal sealed class TrayController : IDisposable
             _usageLines[i].Text = i < usage.Count ? EscapeMnemonics(usage[i]) : string.Empty;
         }
 
-        _toggleItem.Text = TrayText.ToggleLabel(state);
+        _toggleItem.Text = TrayText.ToggleLabel(state, cameras);
         _toggleItem.ShortcutKeyDisplayString = _hotkey.ToString();
         _toggleItem.Enabled = state is not (LockState.Locking or LockState.Unlocking);
     }

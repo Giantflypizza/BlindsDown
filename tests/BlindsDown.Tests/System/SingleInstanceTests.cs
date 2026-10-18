@@ -93,4 +93,72 @@ public sealed class SingleInstanceTests
     [Fact]
     public void SendingWithoutARunningInstanceFails() =>
         Assert.False(SingleInstance.SendToRunningInstance(_prefix, InstanceCommand.Toggle));
+
+    [Fact]
+    public void ACommandLineModeIsTheOnlyInstanceButTakesNoCommands()
+    {
+        // --restore, --selftest: a launch meanwhile must not be told its command was delivered.
+        using SingleInstance? instance = SingleInstance.TryAcquire(_prefix, takesCommands: false);
+        Assert.NotNull(instance);
+
+        using SingleInstance? second = SingleInstance.TryAcquire(_prefix);
+        Assert.Null(second);
+        Assert.False(SingleInstance.SendToRunningInstance(_prefix, InstanceCommand.Unlock));
+    }
+
+    [Fact]
+    public void NothingIsDeliveredAfterStopListening()
+    {
+        using SingleInstance? instance = SingleInstance.TryAcquire(_prefix);
+        Assert.NotNull(instance);
+        int received = 0;
+        instance.CommandReceived += _ => Interlocked.Increment(ref received);
+        instance.Listen();
+
+        instance.StopListening();
+
+        Assert.False(SingleInstance.SendToRunningInstance(_prefix, InstanceCommand.Lock));
+        Assert.False(SingleInstance.SendToRunningInstance(_prefix, InstanceCommand.Show));
+        Assert.Null(SingleInstance.TryAcquire(_prefix)); // Still the only one until it ends.
+        Assert.Equal(0, Volatile.Read(ref received));
+    }
+
+    [Fact]
+    public void StopListeningWithoutListenClosesTheCommandsToo()
+    {
+        using SingleInstance? instance = SingleInstance.TryAcquire(_prefix);
+        Assert.NotNull(instance);
+
+        instance.StopListening();
+        instance.Listen(); // Too late: stopping is for good.
+
+        Assert.False(SingleInstance.SendToRunningInstance(_prefix, InstanceCommand.Toggle));
+    }
+
+    [Fact]
+    public void ACommandSentInTheLastMomentIsReportedByStopListening()
+    {
+        // Sent while the instance takes commands, but not handed on yet (nobody listens on this one): the sender was told
+        // it was delivered, so StopListening says which commands that happened to.
+        using SingleInstance? instance = SingleInstance.TryAcquire(_prefix);
+        Assert.NotNull(instance);
+        Assert.True(SingleInstance.SendToRunningInstance(_prefix, InstanceCommand.Unlock));
+
+        IReadOnlyList<InstanceCommand> late = instance.StopListening();
+
+        Assert.Equal([InstanceCommand.Unlock], late);
+        Assert.Empty(instance.StopListening()); // Once.
+    }
+
+    [Fact]
+    public void TheNextLaunchGetsTheInstanceOnceACommandLineModeEnds()
+    {
+        SingleInstance? restore = SingleInstance.TryAcquire(_prefix, takesCommands: false);
+        Assert.NotNull(restore);
+        restore.Dispose();
+
+        using SingleInstance? next = SingleInstance.TryAcquire(_prefix);
+        Assert.NotNull(next);
+        Assert.True(SingleInstance.SendToRunningInstance(_prefix, InstanceCommand.Toggle));
+    }
 }

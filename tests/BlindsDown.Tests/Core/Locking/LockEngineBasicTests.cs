@@ -118,7 +118,7 @@ public sealed class LockEngineBasicTests
         Assert.Equal(DeviceProtection.Excluded, world.DeviceStatus("sonar").Protection);
         Assert.True(world.DeviceStatus("sonar").IsVirtual);
 
-        // Another app unmuting/muting an excluded mic is none of our business.
+        // Another app unmuting/muting an excluded mic is none of BlindsDown's business.
         world.Mics.OtherAppSetsMute("sonar", true);
         world.Mics.OtherAppSetsMute("sonar", false);
         world.Pump();
@@ -133,7 +133,7 @@ public sealed class LockEngineBasicTests
     public void ExclusionByStableKeySurvivesAPortChange()
     {
         var world = new LockWorld();
-        world.Mics.Add("usb-port1", hardware: @"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000", description: "Microphone");
+        world.Mics.Add("usb-port1", hardware: @"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000", description: "Microphone");
         world.Mics.Add("other");
         world.Exclude("usb-port1", byStableKeyOnly: true);
         world.Engine.Initialize();
@@ -331,5 +331,9 @@ public sealed class LockEngineBasicTests
             beforeSetMute();
             inner.SetMute(endpointId, muted);
         }
+
+        public void SetEndpointEnabled(string endpointId, bool enabled) => inner.SetEndpointEnabled(endpointId, enabled);
+
+        public void SetDefaultMic(string endpointId, MicRole role) => inner.SetDefaultMic(endpointId, role);
     }
 }

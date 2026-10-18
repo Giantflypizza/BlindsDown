@@ -14,6 +14,7 @@ internal static partial class PopupNative
     public const int WS_EX_NOACTIVATE = 0x08000000;
     public const int CS_DROPSHADOW = 0x00020000;
 
+    public const int WM_ENABLE = 0x000A;
     public const int WM_MOUSEACTIVATE = 0x0021;
     public const int WM_SETTINGCHANGE = 0x001A;
     public const int WM_DISPLAYCHANGE = 0x007E;
@@ -28,6 +29,8 @@ internal static partial class PopupNative
     private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
     private const int DWMWCP_ROUND = 2;
     private const int DWMWCP_ROUNDSMALL = 3;
+
+    private const int BCM_SETSHIELD = 0x160C;
 
     private const nint HWND_TOPMOST = -1;
     private const uint SWP_NOSIZE = 0x0001;
@@ -59,6 +62,30 @@ internal static partial class PopupNative
     /// </summary>
     public static bool IsWinKeyDown() =>
         (GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0;
+
+    /// <summary>
+    /// Puts Windows' administrator shield on a button whose click leads to a UAC prompt (BCM_SETSHIELD), the
+    /// way Windows marks such buttons itself. Only a native button draws it, so the button must use
+    /// <see cref="FlatStyle.System"/>.
+    /// </summary>
+    public static void ShowElevationShield(nint buttonHandle) =>
+        _ = SendMessageW(buttonHandle, BCM_SETSHIELD, 0, 1);
+
+    /// <summary>Enables (or disables) mouse and keyboard input to a window. Popups use it to stay usable while a
+    /// modal dialog (Settings, About) has disabled every other window of the thread.</summary>
+    public static void EnableWindow(nint hwnd, bool enable) => _ = EnableWindowNative(hwnd, enable ? 1 : 0);
+
+    /// <summary>Whether a window accepts mouse and keyboard input.</summary>
+    public static bool IsWindowEnabled(nint hwnd) => IsWindowEnabledNative(hwnd) != 0;
+
+    [LibraryImport("user32.dll", EntryPoint = "EnableWindow")]
+    private static partial int EnableWindowNative(nint hwnd, int enable);
+
+    [LibraryImport("user32.dll", EntryPoint = "IsWindowEnabled")]
+    private static partial int IsWindowEnabledNative(nint hwnd);
+
+    [LibraryImport("user32.dll")]
+    private static partial nint SendMessageW(nint hwnd, int message, nint wParam, nint lParam);
 
     [LibraryImport("dwmapi.dll")]
     private static partial int DwmSetWindowAttribute(nint hwnd, int attribute, ref int value, int size);

@@ -71,7 +71,7 @@ internal static class EndpointReader
     }
 
     /// <summary>
-    /// Turns the controller property ("{1}.USB\VID_1038&amp;PID_12E0&amp;MI_00\9&amp;...") into a PnP instance ID by
+    /// Turns the controller property ("{1}.USB\VID_1234&amp;PID_5678&amp;MI_00\9&amp;...") into a PnP instance ID by
     /// removing the "{n}." prefix. A value without the prefix is returned as is; empty values give null.
     /// </summary>
     public static string? ParseControllerDeviceId(string? value)

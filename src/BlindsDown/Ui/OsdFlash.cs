@@ -39,7 +39,9 @@ internal sealed class OsdFlash : IDisposable
     /// <summary>The flash window, once one has been shown.</summary>
     internal Form? Window => _window;
 
-    public void Show(LockState state, string? detail = null)
+    /// <summary>Flashes the new state. <paramref name="cameras"/>: the change covered the cameras too (the camera
+    /// helper locked or unlocked them), so the title says "Microphones and cameras locked".</summary>
+    public void Show(LockState state, string? detail = null, bool cameras = false)
     {
         if (_disposed)
         {
@@ -49,10 +51,10 @@ internal sealed class OsdFlash : IDisposable
         try
         {
             MonitorArea monitor = MonitorSource();
-            Size size = OverlayPainter.MeasureOsd(state, detail, monitor.Scale);
+            Size size = OverlayPainter.MeasureOsd(state, detail, monitor.Scale, cameras);
             Rectangle bounds = OverlayLayout.CenterIn(monitor.WorkingArea, size);
             _window ??= new OsdWindow();
-            _window.ShowContent(state, detail, monitor.Scale, bounds, HideFromScreenCapture);
+            _window.ShowContent(state, detail, monitor.Scale, bounds, HideFromScreenCapture, cameras);
 
             _timer.Stop();
             _timer.Interval = HoldMs;

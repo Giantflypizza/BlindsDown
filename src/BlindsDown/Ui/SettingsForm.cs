@@ -9,23 +9,49 @@ namespace BlindsDown.Ui;
 /// Settings window (tabs). It edits a COPY of the settings; the caller reads
 /// <see cref="Result"/> after DialogResult.OK and applies it.
 ///  * General: hotkey (HotkeyBox; validated by calling <c>tryHotkey</c>, which returns null on success or
-///    an error message), play sounds, start with Windows (<see cref="StartWithWindows"/>), alert options.
+///    an error message), automatic lock (Win+L, sleep), play sounds, start with Windows
+///    (<see cref="StartWithWindows"/>), alert options.
+///  * Camera: the optional camera helper (<see cref="HelperUiState"/>, see <see cref="CameraTab"/>) and the
+///    camera options. Its buttons ask first (<see cref="Dialogs.ConfirmInstallHelper"/>,
+///    <see cref="Dialogs.ConfirmRemoveHelper"/>), then raise <see cref="EnableHelperRequested"/>,
+///    <see cref="UpdateHelperRequested"/> or <see cref="RemoveHelperRequested"/>; the app does the work while
+///    this window stays open and reports back through <see cref="SetHelperState"/>.
 ///  * Indicator: show overlay, corner, screen edges, hide from screen capture.
-///  * Devices: every microphone from <c>devices</c> with its current protection ("Muted in hardware",
-///    "Muted in software (exclusive-mode apps can bypass)", "Disabled in Windows – left alone"...), a
-///    checkbox per device to exclude it (writes <see cref="AppSettings.ExcludedDevices"/> using
-///    <c>DeviceLockInfo</c>'s id plus its stable key). Exclusions can't be changed while locked (shows why).
+///  * Devices: every microphone, camera and piece of microphone hardware from <c>devices</c> with its kind,
+///    type and protection ("Muted in hardware", "Turned off (device disabled)", "Disabled in Windows – left
+///    alone"...; while unlocked, what the next lock would do), a checkbox per device to exclude it (writes
+///    <see cref="AppSettings.ExcludedDevices"/> using <c>DeviceLockInfo</c>'s id plus its stable key, for every
+///    kind). Exclusions can't be changed while locked (shows why). Below the list: the stronger microphone lock.
 ///  * Alerts: list of "always allowed" apps with Remove.
 ///  * History: enable, retention days, "Clear history" (raises <see cref="ClearHistoryRequested"/>).
 /// <c>tryHotkey</c> is only called when the hotkey actually changed, because it registers the hotkey for real.
+/// The global hotkey keeps working while this window is open; only a press while the hotkey box is taking keys
+/// (<see cref="IsHotkeyBoxCapturing"/>) goes into the box instead (<see cref="OfferCapturedHotkey"/>).
+/// <c>locked</c> is the state when the window opened (it decides whether exclusions can be edited); the lock can
+/// still change while the window is open (tray click, automatic lock), so the "Remove helper" question asks
+/// <c>isLockedNow</c> at the moment it is shown.
 /// </summary>
 internal sealed class SettingsForm : Form
 {
+    /// <summary>The General tab's note on popups while locked (cameras count once the camera lock is on).</summary>
+    internal const string LockedPopupsHint =
+        "While locked, every app that opens a microphone (or a camera, when cameras are locked) shows a popup, even with popups off or for apps you always allow.";
+
+    /// <summary>The Alerts tab's explanation of the "always allow" list: it only quiets popups while unlocked.</summary>
+    internal const string AllowedAppsText =
+        "While unlocked, these apps don't show a popup when they use your microphone or camera. While locked they still do. Their use still shows in Activity.";
+
+    /// <summary>Under the History tab's checkbox: turning history off stops app-use records, not the lock timeline.</summary>
+    internal const string LockTimelineHint =
+        "Locks and unlocks are always recorded in Activity's lock timeline, even with history off, so nothing can unlock without you seeing it. They are kept for the same number of days.";
+
     /// <summary>The device name column gives up width first when the window is narrow.</summary>
     private const int DeviceNameColumn = 1;
+    private const int ProtectionColumn = 4;
 
     private readonly AppSettings _working;
     private readonly bool _locked;
+    private readonly Func<bool>? _isLockedNow;
     private readonly bool _startupDisabledInTaskManager;
     private readonly Func<Hotkey, string?> _tryHotkey;
     private readonly Hotkey _originalHotkey;
@@ -36,6 +62,8 @@ internal sealed class SettingsForm : Form
     private readonly TabPage _generalTab = Page("General");
     private readonly HotkeyBox _hotkeyBox = new() { Width = 240, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 0, 4) };
     private readonly Label _hotkeyError;
+    private readonly CheckBox _autoLockOnWindowsLock;
+    private readonly CheckBox _autoLockOnSleep;
     private readonly CheckBox _playSounds;
     private readonly CheckBox _startWithWindows;
     private readonly CheckBox _alertsEnabled;
@@ -44,12 +72,18 @@ internal sealed class SettingsForm : Form
     private readonly ComboBox _corner = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160, Anchor = AnchorStyles.Left };
     private readonly CheckBox _showEdges;
     private readonly CheckBox _hideFromCapture;
+    private readonly CameraTab _cameraTab;
     private readonly ListView _deviceList = NewList(checkBoxes: true, DeviceNameColumn);
+    private readonly Label _noDevices;
+    private readonly CheckBox _disableMicsInWindows;
     private readonly ListView _appList = NewList(checkBoxes: false, flexibleColumn: -1);
     private readonly Button _removeApp = DialogLayout.Button("Remove");
     private readonly CheckBox _historyEnabled;
     private readonly NumericUpDown _retention = new() { Minimum = 1, Maximum = 3650, Width = 72, Anchor = AnchorStyles.Left, TextAlign = HorizontalAlignment.Right };
     private readonly Label _historyStatus;
+
+    /// <summary>True while the device list is being filled, when ItemChecked must not rewrite texts.</summary>
+    private bool _fillingDevices;
 
     public SettingsForm(
         AppSettings working,
@@ -57,11 +91,14 @@ internal sealed class SettingsForm : Form
         bool locked,
         bool startWithWindows,
         Func<Hotkey, string?> tryHotkey,
-        bool startupDisabledInTaskManager = false)
+        bool startupDisabledInTaskManager = false,
+        HelperUiState? helper = null,
+        Func<bool>? isLockedNow = null)
     {
         _startupDisabledInTaskManager = startupDisabledInTaskManager;
         _working = SettingsStore.Clone(working);
         _locked = locked;
+        _isLockedNow = isLockedNow;
         _tryHotkey = tryHotkey;
         _originalHotkey = _working.GetHotkey();
         _allowedApps = [.. _working.AllowedApps];
@@ -72,9 +109,11 @@ internal sealed class SettingsForm : Form
         _hotkeyError = DialogLayout.Text(string.Empty, margin: new Padding(0, 0, 0, 6));
         _hotkeyError.ForeColor = UiPalette.ErrorText;
         _hotkeyError.Visible = false;
+        _autoLockOnWindowsLock = DialogLayout.Check("Lock when I lock Windows (Win+L)", _working.AutoLockOnWindowsLock);
+        _autoLockOnSleep = DialogLayout.Check("Lock when the PC goes to sleep", _working.AutoLockOnSleep);
         _playSounds = DialogLayout.Check("Play a sound when locking and unlocking", _working.PlaySounds);
         _startWithWindows = DialogLayout.Check("Start BlindsDown when I sign in to Windows", startWithWindows);
-        _alertsEnabled = DialogLayout.Check("Show a popup when an app starts using a microphone", _working.AlertsEnabled);
+        _alertsEnabled = DialogLayout.Check("Show a popup when an app starts using a microphone or camera", _working.AlertsEnabled);
         _alertOnStop = Indented(DialogLayout.Check("Also show a popup when it stops", _working.AlertOnStop));
         _showOverlay = DialogLayout.Check("Show a lock indicator on every screen while locked", _working.ShowOverlay);
         _showEdges = DialogLayout.Check("Red lines along the screen edges while locked", _working.ShowScreenEdges);
@@ -82,6 +121,10 @@ internal sealed class SettingsForm : Form
         _historyEnabled = DialogLayout.Check("Keep a history of which apps used your microphone or camera", _working.HistoryEnabled);
         _historyStatus = DialogLayout.Hint(string.Empty);
         _historyStatus.Visible = false;
+        _noDevices = DialogLayout.Hint("No microphones or cameras found. Connect one and open Settings again.");
+        _disableMicsInWindows = DialogLayout.Check("Turn microphones off in Windows while locked, not just mute them", _working.DisableMicsInWindows);
+        _cameraTab = new CameraTab(_working);
+        _cameraTab.SetState(helper ?? HelperUiState.NotInstalled);
 
         SuspendLayout();
         DialogLayout.Initialize(this, "BlindsDown Settings", _font);
@@ -91,10 +134,13 @@ internal sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(740, 560);
-        MinimumSize = new Size(560, 480);
+        // Wide enough for the device list's five columns, short enough for a 1280×720 screen at 100 %. At the
+        // minimum size the device list still shows a handful of rows above the stronger-lock section.
+        ClientSize = new Size(840, 600);
+        MinimumSize = new Size(600, 580);
 
         BuildGeneralTab();
+        BuildCameraTab();
         BuildIndicatorTab();
         BuildDevicesTab(devices);
         BuildAlertsTab();
@@ -125,12 +171,88 @@ internal sealed class SettingsForm : Form
 
     public event Action? ClearHistoryRequested;
 
+    /// <summary>"Turn on camera lock" (install the helper), after the user confirmed
+    /// <see cref="Dialogs.ConfirmInstallHelper"/>; "Lock cameras" is ticked too. The host shows the UAC prompt and
+    /// then calls <see cref="SetHelperState"/>; the dialog stays open meanwhile.</summary>
+    public event Action? EnableHelperRequested;
+
+    /// <summary>"Update helper", or "Repair" for a helper that isn't responding (both reinstall it; no question
+    /// first, the UAC prompt is the confirmation).</summary>
+    public event Action? UpdateHelperRequested;
+
+    /// <summary>"Remove helper", after the user confirmed <see cref="Dialogs.ConfirmRemoveHelper"/>.</summary>
+    public event Action? RemoveHelperRequested;
+
+    /// <summary>
+    /// Refreshes the Camera tab after an install, update or removal (or to show <see cref="HelperAvailability.Busy"/>
+    /// while one runs), and the Devices list when <paramref name="devices"/> (microphones, cameras and microphone
+    /// hardware) is given. Nothing the user is editing is lost: the camera options keep their checkboxes, and the
+    /// device list keeps the exclusions as currently ticked. Safe to call after the window closed (does nothing).
+    /// UI thread only.
+    /// </summary>
+    public void SetHelperState(HelperUiState state, IReadOnlyList<DeviceLockInfo>? devices = null)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _cameraTab.SetState(state);
+        if (devices is null)
+        {
+            RefreshProtectionTexts();
+            return;
+        }
+
+        FillDeviceList(devices, CurrentExclusions());
+        FitColumns();
+    }
+
     /// <summary>The edited settings (valid after DialogResult.OK).</summary>
     public AppSettings Result { get; private set; }
 
     public bool StartWithWindows { get; private set; }
 
-    /// <summary>Shows a tab by its title ("General", "Indicator", "Devices", "Alerts", "History").</summary>
+    /// <summary>The device list and the Camera tab, so tests can make edits without showing the window.</summary>
+    internal ListView DeviceList => _deviceList;
+
+    internal CameraTab Camera => _cameraTab;
+
+    /// <summary>The History tab's retention box, so tests can check it without showing the window.</summary>
+    internal NumericUpDown Retention => _retention;
+
+    /// <summary>The hotkey error under the hotkey box ("" when there is none).</summary>
+    internal string HotkeyError => _hotkeyError.Text;
+
+    /// <summary>Whether BlindsDown is locked right now (the "Remove helper" question says whether locked cameras
+    /// come back on first): asked of the host, since the lock can change while this window is open.</summary>
+    internal bool LockedNow => _isLockedNow?.Invoke() ?? _locked;
+
+    /// <summary>
+    /// True while the hotkey box has the keyboard focus in this window and this window is the active one: the user
+    /// is entering a combination. The global hotkey stays registered while Settings is open, and Windows hands a
+    /// registered combination to its owner instead of the focused box, so the host offers such a press to the box
+    /// (<see cref="OfferCapturedHotkey"/>) instead of toggling the lock. UI thread only.
+    /// </summary>
+    public bool IsHotkeyBoxCapturing => !IsDisposed && Visible && ActiveForm == this && _hotkeyBox.Focused;
+
+    /// <summary>
+    /// The current global hotkey was pressed while <see cref="IsHotkeyBoxCapturing"/>: puts that combination into the
+    /// hotkey box, as if the box had received it, and clears any hotkey error. UI thread only.
+    /// </summary>
+    public void OfferCapturedHotkey(Hotkey hotkey)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _hotkeyBox.TakeHotkey(hotkey);
+        HideHotkeyError();
+    }
+
+    /// <summary>Shows a tab by its title ("General", "Camera", "Indicator", "Devices", "Alerts", "History").</summary>
     public void SelectTab(string title)
     {
         TabPage? page = _tabs.TabPages.Cast<TabPage>().FirstOrDefault(p => string.Equals(p.Text, title, StringComparison.OrdinalIgnoreCase));
@@ -157,6 +279,9 @@ internal sealed class SettingsForm : Form
         if (disposing)
         {
             ClearHistoryRequested = null;
+            EnableHelperRequested = null;
+            UpdateHelperRequested = null;
+            RemoveHelperRequested = null;
             _font.Dispose();
         }
 
@@ -167,12 +292,17 @@ internal sealed class SettingsForm : Form
     {
         TableLayoutPanel stack = DialogLayout.Stack(Padding.Empty);
         DialogLayout.AddRow(stack, DialogLayout.Heading("Hotkey", first: true));
-        DialogLayout.AddRow(stack, DialogLayout.Text("Press it anywhere in Windows to lock or unlock your microphones."));
+        DialogLayout.AddRow(stack, DialogLayout.Text("Press it anywhere in Windows to lock or unlock."));
         _hotkeyBox.Value = _originalHotkey;
-        _hotkeyBox.HotkeyChanged += _ => _hotkeyError.Visible = false;
+        _hotkeyBox.HotkeyChanged += _ => HideHotkeyError();
         DialogLayout.AddRow(stack, _hotkeyBox);
         DialogLayout.AddRow(stack, _hotkeyError);
         DialogLayout.AddRow(stack, DialogLayout.Hint("Click the box, then press the new combination. Esc cancels, Backspace clears. F13–F24 work well with macro keys."));
+
+        DialogLayout.AddRow(stack, DialogLayout.Heading("Automatic lock"));
+        DialogLayout.AddRow(stack, _autoLockOnWindowsLock);
+        DialogLayout.AddRow(stack, _autoLockOnSleep);
+        DialogLayout.AddRow(stack, DialogLayout.Hint("Unlocking is always up to you."));
 
         DialogLayout.AddRow(stack, DialogLayout.Heading("Sounds and startup"));
         DialogLayout.AddRow(stack, _playSounds);
@@ -189,12 +319,48 @@ internal sealed class SettingsForm : Form
         DialogLayout.AddRow(stack, DialogLayout.Heading("Popups"));
         DialogLayout.AddRow(stack, _alertsEnabled);
         DialogLayout.AddRow(stack, _alertOnStop);
-        DialogLayout.AddRow(stack, DialogLayout.Hint("While your microphones are locked, every app that opens one shows a popup, even with popups off or for apps you always allow."));
+        DialogLayout.AddRow(stack, DialogLayout.Hint(LockedPopupsHint));
         _alertsEnabled.CheckedChanged += (_, _) => _alertOnStop.Enabled = _alertsEnabled.Checked;
         _alertOnStop.Enabled = _alertsEnabled.Checked;
 
         _generalTab.Controls.Add(stack);
         _tabs.TabPages.Add(_generalTab);
+    }
+
+    private void BuildCameraTab()
+    {
+        TabPage page = Page("Camera");
+        page.Controls.Add(_cameraTab.Content);
+        _cameraTab.OptionsChanged += RefreshProtectionTexts;
+        _cameraTab.EnableClicked += () =>
+        {
+            if (Dialogs.ConfirmInstallHelper(this))
+            {
+                // "Turn on camera lock" means cameras are locked from now on, even if "Lock cameras" was unticked
+                // before an earlier removal.
+                _cameraTab.LockCameras.Checked = true;
+                EnableHelperRequested?.Invoke();
+            }
+        };
+        _cameraTab.FixClicked += () =>
+        {
+            // Update and Repair need no question (the UAC prompt is the confirmation), but replacing a helper from a
+            // newer BlindsDown with this older one does: an old copy of the app must not downgrade it unnoticed.
+            if (_cameraTab.State.Availability != HelperAvailability.NeedsUpdate
+                || _cameraTab.VersionAge != HelperVersionAge.Newer
+                || Dialogs.ConfirmReplaceNewerHelper(_cameraTab.HelperVersion, _cameraTab.AppVersionText, this))
+            {
+                UpdateHelperRequested?.Invoke();
+            }
+        };
+        _cameraTab.RemoveClicked += () =>
+        {
+            if (Dialogs.ConfirmRemoveHelper(LockedNow, this))
+            {
+                RemoveHelperRequested?.Invoke();
+            }
+        };
+        _tabs.TabPages.Add(page);
     }
 
     private void BuildIndicatorTab()
@@ -233,11 +399,11 @@ internal sealed class SettingsForm : Form
             ColumnStyles = { new ColumnStyle(SizeType.Percent, 100f) },
         };
 
-        DialogLayout.AddRow(table, DialogLayout.Text("BlindsDown locks every working microphone. Exclude a microphone to leave it alone while locked."));
+        DialogLayout.AddRow(table, DialogLayout.Text("BlindsDown locks every working microphone and, with camera lock on, your cameras. Exclude a device to leave it alone while locked."));
         if (_locked)
         {
             DialogLayout.AddRow(table, DialogLayout.Banner(
-                "Exclusions can't be changed while your microphones are locked. Unlock first, then change them here.",
+                "Exclusions can't be changed while locked. Unlock first, then change them here.",
                 AlertSeverity.Warning));
         }
 
@@ -246,59 +412,161 @@ internal sealed class SettingsForm : Form
         // mode hide) exactly the information the user is looking for.
         _deviceList.CheckBoxes = !_locked;
         _deviceList.Columns.Add("Exclude");
-        _deviceList.Columns.Add("Microphone");
+        _deviceList.Columns.Add("Device");
+        _deviceList.Columns.Add("Kind");
         _deviceList.Columns.Add("Type");
         _deviceList.Columns.Add("Protection");
-        foreach (DeviceLockInfo device in devices.Where(d => d.Kind == DeviceKind.Microphone).OrderBy(d => d.IsVirtual).ThenBy(d => d.Name, StringComparer.CurrentCultureIgnoreCase))
-        {
-            bool excluded = DeviceExclusions.IsExcluded(_working.ExcludedDevices, device, devices);
-            var item = new ListViewItem(_locked && excluded ? "Yes" : string.Empty)
-            {
-                Tag = device,
-                Checked = excluded,
-                ToolTipText = device.Name,
-            };
-            item.SubItems.Add(device.Name);
-            item.SubItems.Add(DeviceText.Type(device.IsVirtual));
-            ListViewItem.ListViewSubItem protection = item.SubItems.Add(DeviceText.Protection(device, _locked));
-            if (device.Problem is not null)
-            {
-                // A device the lock could not protect must stand out.
-                item.UseItemStyleForSubItems = false;
-                protection.ForeColor = UiPalette.ErrorText;
-            }
-
-            _deviceList.Items.Add(item);
-        }
-
-        foreach (DeviceExclusion orphan in DeviceExclusions.Orphans(_working.ExcludedDevices, devices))
-        {
-            var item = new ListViewItem(_locked ? "Yes" : string.Empty) { Tag = orphan, Checked = true, ToolTipText = orphan.DisplayName };
-            item.SubItems.Add(orphan.DisplayName);
-            item.SubItems.Add(DeviceText.Empty);
-            item.SubItems.Add("Not connected");
-            _deviceList.Items.Add(item);
-        }
-
         _deviceList.AccessibleName = _locked
-            ? "Microphones and how each one is protected"
-            : "Microphones. Check a microphone to exclude it from the lock.";
-        if (_deviceList.Items.Count == 0)
-        {
-            DialogLayout.AddRow(table, DialogLayout.Hint("No microphones found. Connect one and open Settings again."));
-        }
-        else
-        {
-            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-            table.RowCount = table.RowStyles.Count;
-            _deviceList.Dock = DockStyle.Fill;
-            _deviceList.Margin = new Padding(0, 4, 0, 8);
-            table.Controls.Add(_deviceList, 0, table.RowCount - 1);
-        }
+            ? "Microphones, cameras and how each one is protected"
+            : "Microphones and cameras. Check a device to exclude it from the lock.";
+        _deviceList.ItemChecked += (_, e) => OnDeviceChecked(e.Item);
 
-        DialogLayout.AddRow(table, DialogLayout.Hint("Virtual microphones (such as SteelSeries Sonar) are fed by your physical ones, so locking the physical ones silences them too.", new Padding(0)));
+        DialogLayout.AddRow(table, _noDevices);
+        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        table.RowCount = table.RowStyles.Count;
+        _deviceList.Dock = DockStyle.Fill;
+        _deviceList.Margin = new Padding(0, 4, 0, 8);
+        table.Controls.Add(_deviceList, 0, table.RowCount - 1);
+        FillDeviceList(devices, _working.ExcludedDevices);
+
+        DialogLayout.AddRow(table, DialogLayout.Hint("Virtual microphones (such as SteelSeries Sonar) are fed by your physical ones, so locking those silences them too."));
+
+        DialogLayout.AddRow(table, DialogLayout.Heading("Stronger microphone lock"));
+        DialogLayout.AddRow(table, _disableMicsInWindows);
+        _disableMicsInWindows.CheckedChanged += (_, _) => RefreshProtectionTexts();
+        string stronger = "Apps that have a microphone open lose it, like when it is unplugged; some need it picked again after unlocking. "
+            + "Virtual microphones are only muted, and a default microphone stays on while another one isn't locked, so Windows can't switch apps to that one.";
+        DialogLayout.AddRow(table, Indented(DialogLayout.Hint(_locked ? stronger + " Changes apply the next time you lock." : stronger, Padding.Empty)));
+
         page.Controls.Add(table);
         _tabs.TabPages.Add(page);
+    }
+
+    /// <summary>
+    /// (Re)fills the device list: microphones first, then cameras, then microphone hardware; physical before
+    /// virtual; then by name. <paramref name="exclusions"/> decides the checkboxes (the saved ones at first,
+    /// the ones currently ticked when the list is refreshed), and exclusions without a connected device stay
+    /// as their own rows so they can still be removed.
+    /// </summary>
+    private void FillDeviceList(IReadOnlyList<DeviceLockInfo> devices, IReadOnlyList<DeviceExclusion> exclusions)
+    {
+        LockPreview preview = Preview();
+        _fillingDevices = true;
+        _deviceList.BeginUpdate();
+        try
+        {
+            _deviceList.Items.Clear();
+            IEnumerable<DeviceLockInfo> ordered = devices
+                .OrderBy(d => d.Kind)
+                .ThenBy(d => d.IsVirtual)
+                .ThenBy(d => d.Name, StringComparer.CurrentCultureIgnoreCase);
+            foreach (DeviceLockInfo device in ordered)
+            {
+                bool excluded = DeviceExclusions.IsExcluded(exclusions, device, devices);
+                var item = new ListViewItem(_locked && excluded ? "Yes" : string.Empty)
+                {
+                    Tag = device,
+                    Checked = excluded,
+                };
+                item.SubItems.Add(device.Name);
+                item.SubItems.Add(DeviceText.Kind(device.Kind));
+                item.SubItems.Add(DeviceText.Type(device));
+                ListViewItem.ListViewSubItem protection = item.SubItems.Add(string.Empty);
+                ShowProtection(item, device, preview);
+                if (device.Problem is not null)
+                {
+                    // A device the lock could not protect must stand out.
+                    item.UseItemStyleForSubItems = false;
+                    protection.ForeColor = UiPalette.ErrorText;
+                }
+
+                _deviceList.Items.Add(item);
+            }
+
+            foreach (DeviceExclusion orphan in DeviceExclusions.Orphans(exclusions, devices))
+            {
+                var item = new ListViewItem(_locked ? "Yes" : string.Empty) { Tag = orphan, Checked = true, ToolTipText = orphan.DisplayName + "\nNot connected" };
+                item.SubItems.Add(orphan.DisplayName);
+                item.SubItems.Add(DeviceExclusions.KindOf(orphan) is DeviceKind kind ? DeviceText.Kind(kind) : DeviceText.Empty);
+                item.SubItems.Add(DeviceText.Empty);
+                item.SubItems.Add("Not connected");
+                _deviceList.Items.Add(item);
+            }
+        }
+        finally
+        {
+            _deviceList.EndUpdate();
+            _fillingDevices = false;
+        }
+
+        bool any = _deviceList.Items.Count > 0;
+        _deviceList.Visible = any;
+        _noDevices.Visible = !any;
+    }
+
+    /// <summary>The exclusions as the Devices tab shows them now: what OK would save.</summary>
+    private List<DeviceExclusion> CurrentExclusions()
+    {
+        if (_locked)
+        {
+            return _working.ExcludedDevices;
+        }
+
+        List<ListViewItem> checkedItems = _deviceList.Items.Cast<ListViewItem>().Where(i => i.Checked).ToList();
+        return DeviceExclusions.Build(
+            checkedItems.Select(i => i.Tag).OfType<DeviceLockInfo>(),
+            checkedItems.Select(i => i.Tag).OfType<DeviceExclusion>());
+    }
+
+    /// <summary>What the next lock would do follows the options being edited (Camera tab, stronger microphone lock).</summary>
+    private LockPreview Preview() =>
+        new(
+            _cameraTab.HelperAvailable,
+            _cameraTab.LockCameras.Checked,
+            _cameraTab.IncludeInfrared.Checked,
+            _cameraTab.IncludeVirtual.Checked,
+            _cameraTab.DisableMicHardware.Checked,
+            _disableMicsInWindows.Checked);
+
+    private void OnDeviceChecked(ListViewItem item)
+    {
+        if (_fillingDevices || _locked || item.Tag is not DeviceLockInfo device)
+        {
+            return;
+        }
+
+        ShowProtection(item, device, Preview());
+    }
+
+    /// <summary>The Protection cell, and the row's tooltip with the name and protection in full (both columns can
+    /// be cut short in a narrow window).</summary>
+    private void ShowProtection(ListViewItem item, DeviceLockInfo device, LockPreview preview)
+    {
+        string protection = DeviceText.Protection(device, _locked, preview, item.Checked);
+        item.SubItems[ProtectionColumn].Text = protection;
+        item.ToolTipText = device.Name + "\n" + protection;
+    }
+
+    private void RefreshProtectionTexts()
+    {
+        LockPreview preview = Preview();
+        _deviceList.BeginUpdate();
+        try
+        {
+            foreach (ListViewItem item in _deviceList.Items)
+            {
+                if (item.Tag is DeviceLockInfo device)
+                {
+                    ShowProtection(item, device, preview);
+                }
+            }
+        }
+        finally
+        {
+            _deviceList.EndUpdate();
+        }
+
+        ListViews.FitColumns(_deviceList, DeviceNameColumn);
     }
 
     private void BuildAlertsTab()
@@ -312,7 +580,7 @@ internal sealed class SettingsForm : Form
             Margin = Padding.Empty,
             ColumnStyles = { new ColumnStyle(SizeType.Percent, 100f) },
         };
-        DialogLayout.AddRow(table, DialogLayout.Text("These apps never show a popup when they use your microphone. Their use is still recorded in Activity."));
+        DialogLayout.AddRow(table, DialogLayout.Text(AllowedAppsText));
 
         _appList.Columns.Add("App");
         _appList.HeaderStyle = ColumnHeaderStyle.None;
@@ -331,7 +599,7 @@ internal sealed class SettingsForm : Form
         _removeApp.Click += (_, _) => RemoveSelectedApps();
         _appList.SelectedIndexChanged += (_, _) => _removeApp.Enabled = _appList.SelectedItems.Cast<ListViewItem>().Any(i => i.Tag is AllowedApp);
         DialogLayout.AddRow(table, _removeApp);
-        DialogLayout.AddRow(table, DialogLayout.Hint("To add an app, open Activity from the tray menu, right-click the app and choose \"Always allow (no popups)\".", new Padding(0)));
+        DialogLayout.AddRow(table, DialogLayout.Hint($"To add an app, open Activity from the tray menu, right-click the app and choose \"{ActivityForm.AllowText}\".", new Padding(0)));
 
         page.Controls.Add(table);
         _tabs.TabPages.Add(page);
@@ -347,13 +615,14 @@ internal sealed class SettingsForm : Form
         _retention.Value = Math.Clamp(_working.HistoryRetentionDays, (int)_retention.Minimum, (int)_retention.Maximum);
         _retention.AccessibleName = "Days to keep history";
         TableLayoutPanel retentionRow = DialogLayout.Inline(
-            new Padding(20, 2, 0, 8),
+            new Padding(20, 2, 0, 4),
             DialogLayout.Caption("Keep entries for", new Padding(0, 0, 6, 0)),
             _retention,
             DialogLayout.Caption("days", new Padding(6, 0, 0, 0)));
         DialogLayout.AddRow(stack, retentionRow);
-        _historyEnabled.CheckedChanged += (_, _) => retentionRow.Enabled = _historyEnabled.Checked;
-        retentionRow.Enabled = _historyEnabled.Checked;
+
+        // The retention stays editable with history off: the lock timeline is always recorded and pruned with it.
+        DialogLayout.AddRow(stack, Indented(DialogLayout.Hint(LockTimelineHint, new Padding(0, 0, 0, 8))));
 
         DialogLayout.AddRow(stack, DialogLayout.Hint(@"History is stored only on this PC (in %LocalAppData%\BlindsDown) and never leaves it."));
 
@@ -368,7 +637,9 @@ internal sealed class SettingsForm : Form
         _tabs.TabPages.Add(page);
     }
 
-    private void Accept()
+    /// <summary>OK: validates the hotkey, then collects every tab into <see cref="Result"/>. Internal so tests can
+    /// press OK without showing the window.</summary>
+    internal void Accept()
     {
         Hotkey hotkey = _hotkeyBox.Value;
         HotkeyProblem problem = hotkey.Validate();
@@ -398,17 +669,21 @@ internal sealed class SettingsForm : Form
         _working.HistoryEnabled = _historyEnabled.Checked;
         _working.HistoryRetentionDays = (int)_retention.Value;
         _working.AllowedApps = [.. _allowedApps];
-        if (!_locked)
-        {
-            IEnumerable<ListViewItem> checkedItems = _deviceList.Items.Cast<ListViewItem>().Where(i => i.Checked);
-            _working.ExcludedDevices = DeviceExclusions.Build(
-                checkedItems.Select(i => i.Tag).OfType<DeviceLockInfo>(),
-                checkedItems.Select(i => i.Tag).OfType<DeviceExclusion>());
-        }
+        _working.AutoLockOnWindowsLock = _autoLockOnWindowsLock.Checked;
+        _working.AutoLockOnSleep = _autoLockOnSleep.Checked;
+        _working.DisableMicsInWindows = _disableMicsInWindows.Checked;
+        _cameraTab.ApplyTo(_working);
+        _working.ExcludedDevices = CurrentExclusions();
 
         Result = _working;
         StartWithWindows = _startWithWindows.Checked;
         DialogResult = DialogResult.OK;
+    }
+
+    private void HideHotkeyError()
+    {
+        _hotkeyError.Visible = false;
+        _hotkeyError.Text = string.Empty;
     }
 
     private void ConfirmClearHistory()
@@ -418,7 +693,7 @@ internal sealed class SettingsForm : Form
         {
             Caption = "BlindsDown",
             Heading = "Clear all activity history?",
-            Text = "This deletes the record of which apps used your microphone. It can't be undone.",
+            Text = "This deletes the record of which apps used your microphone or camera, and when BlindsDown was locked. It can't be undone.",
             Icon = TaskDialogIcon.Warning,
             Buttons = { clearButton, TaskDialogButton.Cancel },
             DefaultButton = TaskDialogButton.Cancel,

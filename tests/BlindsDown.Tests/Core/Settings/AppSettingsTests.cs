@@ -93,9 +93,9 @@ public sealed class AppSettingsTests : IDisposable
     [Fact]
     public void ExclusionMatchesByStableKeyIgnoringCaseAndPort()
     {
-        MicEndpoint port1 = Mic("{0.0.1.00000000}.{1}", @"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000");
-        MicEndpoint port2 = Mic("{0.0.1.00000000}.{2}", @"usb\vid_1038&pid_12e0&mi_00\A&1234ABCD&0&0000");
-        MicEndpoint otherModel = Mic("{0.0.1.00000000}.{3}", @"USB\VID_1038&PID_12E1&MI_00\9&16010608&0&0000");
+        MicEndpoint port1 = Mic("{0.0.1.00000000}.{1}", @"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000");
+        MicEndpoint port2 = Mic("{0.0.1.00000000}.{2}", @"usb\vid_1234&pid_5678&mi_00\A&1234ABCD&0&0000");
+        MicEndpoint otherModel = Mic("{0.0.1.00000000}.{3}", @"USB\VID_1234&PID_5679&MI_00\9&1A2B3C4D&0&0000");
         var settings = new AppSettings
         {
             ExcludedDevices = [new DeviceExclusion { StableKey = port1.StableKey.ToLowerInvariant(), DisplayName = "Arctis" }],
@@ -132,19 +132,93 @@ public sealed class AppSettingsTests : IDisposable
     }
 
     [Fact]
+    public void ExclusionNeverFollowsToATwinThatWasConnectedWhenItWasMade()
+    {
+        MicEndpoint a = Mic("{0.0.1.00000000}.{A}", @"USB\VID_046D&PID_0825&MI_02\6&AAAA&0&0002");
+        MicEndpoint b = Mic("{0.0.1.00000000}.{B}", @"USB\VID_046D&PID_0825&MI_02\6&BBBB&0&0002");
+        MicEndpoint aGone = a with { State = EndpointState.NotPresent };
+        MicEndpoint c = Mic("{0.0.1.00000000}.{C}", @"USB\VID_046D&PID_0825&MI_02\6&CCCC&0&0002");
+        var withTwins = new AppSettings
+        {
+            ExcludedDevices = [new DeviceExclusion { StableKey = a.StableKey, LastKnownId = a.Id, DisplayName = "Webcam A", TwinIds = [b.Id.ToUpperInvariant()] }],
+        };
+
+        // A is unplugged and B was there all along: B is A's twin, not A in another port.
+        Assert.False(withTwins.IsExcluded(b, [aGone, b]));
+        Assert.True(withTwins.IsExcluded(c, [aGone, c]));
+        Assert.True(withTwins.IsExcluded(a, [a, b]));
+
+        // An exclusion made before twins were recorded can't tell the two cases apart.
+        var withoutTwins = new AppSettings
+        {
+            ExcludedDevices = [new DeviceExclusion { StableKey = a.StableKey, LastKnownId = a.Id, DisplayName = "Webcam A" }],
+        };
+        Assert.True(withoutTwins.IsExcluded(b, [aGone, b]));
+    }
+
+    [Fact]
+    public void ExclusionsAndAllowedAppsWithMissingValuesAreRepaired()
+    {
+        // "required" only demands that a property is there: a hand-edited file can still say null.
+        string path = _temp.File("settings.json");
+        File.WriteAllText(
+            path,
+            """
+            {
+              "excludedDevices": [
+                { "stableKey": null, "displayName": "Ghost" },
+                { "stableKey": " ", "displayName": "Blank" },
+                { "stableKey": "cam|X|Y", "lastKnownId": "id", "displayName": null },
+                { "stableKey": "mic|A|B", "displayName": "Mic", "twinIds": [ null, "", "twin" ] },
+                { "stableKey": "mic|C|D", "displayName": "Other", "twinIds": [ null ] }
+              ],
+              "allowedApps": [ { "appKey": null, "displayName": "x" }, { "appKey": "exe:a", "displayName": null } ]
+            }
+            """);
+
+        AppSettings settings = new SettingsStore(path).Load();
+
+        Assert.Equal(["cam|X|Y", "mic|A|B", "mic|C|D"], settings.ExcludedDevices.Select(e => e.StableKey));
+        Assert.Equal("cam|X|Y", settings.ExcludedDevices[0].DisplayName);
+        Assert.Equal(["twin"], settings.ExcludedDevices[1].TwinIds!);
+        Assert.Null(settings.ExcludedDevices[2].TwinIds);
+        AllowedApp app = Assert.Single(settings.AllowedApps);
+        Assert.Equal("exe:a", app.DisplayName);
+        Assert.False(settings.IsExcluded(Mic("x"), [Mic("x")]));
+
+        // A copy for the Settings window round-trips (a null required value would make it throw).
+        AppSettings copy = SettingsStore.Clone(settings);
+        Assert.Equal(settings.ExcludedDevices, copy.ExcludedDevices);
+        Assert.Equal(settings.AllowedApps, copy.AllowedApps);
+    }
+
+    [Fact]
+    public void ExclusionsCompareTheirTwinsByContent()
+    {
+        var one = new DeviceExclusion { StableKey = "k", LastKnownId = "a", DisplayName = "d", TwinIds = ["b"] };
+        var same = new DeviceExclusion { StableKey = "k", LastKnownId = "a", DisplayName = "d", TwinIds = ["b"] };
+
+        Assert.Equal(one, same);
+        Assert.Equal(one.GetHashCode(), same.GetHashCode());
+        Assert.NotEqual(one, same with { TwinIds = ["c"] });
+        Assert.NotEqual(one, same with { TwinIds = null });
+        Assert.Equal(one with { TwinIds = null }, same with { TwinIds = [] });
+    }
+
+    [Fact]
     public void DifferentBluetoothHeadsetsHaveDifferentStableKeys()
     {
-        MicEndpoint airPods = Mic("{0.0.1.00000000}.{1}", @"BTHHFENUM\BTHHFPAUDIO\D&258BE8DF&0&97") with { Name = "Headset (AirPods Pro - Find My Hands-Free)" };
+        MicEndpoint earbuds = Mic("{0.0.1.00000000}.{1}", @"BTHHFENUM\BTHHFPAUDIO\D&0BADF00D&0&97") with { Name = "Headset (Wireless Earbuds Hands-Free)" };
         MicEndpoint other = Mic("{0.0.1.00000000}.{2}", @"BTHHFENUM\BTHHFPAUDIO\D&11111111&0&12") with { Name = "Headset (WH-1000XM5 Hands-Free)" };
 
-        Assert.NotEqual(airPods.StableKey, other.StableKey);
+        Assert.NotEqual(earbuds.StableKey, other.StableKey);
     }
 
     [Fact]
     public void WindowsDuplicateNumberingDoesNotChangeTheStableKey()
     {
-        MicEndpoint first = Mic("{0.0.1.00000000}.{1}", @"USB\VID_1038&PID_12E0&MI_00\9&22DA850E&0&0000") with { Name = "Microphone (Arctis Nova Pro Wireless)" };
-        MicEndpoint second = Mic("{0.0.1.00000000}.{2}", @"USB\VID_1038&PID_12E0&MI_00\9&16010608&0&0000") with { Name = "Microphone (2- Arctis Nova Pro Wireless)" };
+        MicEndpoint first = Mic("{0.0.1.00000000}.{1}", @"USB\VID_1234&PID_5678&MI_00\9&5E6F7A8B&0&0000") with { Name = "Microphone (USB Headset)" };
+        MicEndpoint second = Mic("{0.0.1.00000000}.{2}", @"USB\VID_1234&PID_5678&MI_00\9&1A2B3C4D&0&0000") with { Name = "Microphone (2- USB Headset)" };
 
         Assert.Equal(first.StableKey, second.StableKey);
     }
@@ -186,7 +260,7 @@ public sealed class AppSettingsTests : IDisposable
             AlertOnStop = true,
             HistoryEnabled = false,
             HistoryRetentionDays = 7,
-            ExcludedDevices = [new DeviceExclusion { StableKey = "mic|X|Y", LastKnownId = "id", DisplayName = "Sonar" }],
+            ExcludedDevices = [new DeviceExclusion { StableKey = "mic|X|Y", LastKnownId = "id", DisplayName = "Sonar", TwinIds = ["twin"] }],
             AllowedApps = [new AllowedApp { AppKey = "exe:SONAR.EXE|SONAR", DisplayName = "Sonar" }],
             FirstRunDone = true,
         };
@@ -273,7 +347,7 @@ public sealed class AppSettingsTests : IDisposable
     private static MicEndpoint Mic(string id, string? hardware = null) => new()
     {
         Id = id,
-        Name = "Microphone (Arctis Nova Pro Wireless)",
+        Name = "Microphone (USB Headset)",
         EndpointDescription = "Microphone",
         State = EndpointState.Active,
         HardwareInstanceId = hardware,

@@ -1,6 +1,7 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
+using System.Runtime.InteropServices;
 using BlindsDown.Core.Locking;
 
 namespace BlindsDown.Ui.Tray;
@@ -37,9 +38,14 @@ internal static class OverlayPainter
         return body.FontFamily.Name;
     });
 
-    /// <summary>Text on the pill (Stage 1 locks microphones only).</summary>
-    public static string PillText(LockState state) =>
-        state == LockState.PartiallyLocked ? "PARTIALLY LOCKED" : "MIC LOCKED";
+    /// <summary>
+    /// Text on the pill: "MIC LOCKED", or "MIC + CAMERA LOCKED" while the camera helper also has the cameras
+    /// turned off. A partial lock says so whatever is locked, since that is what matters then.
+    /// </summary>
+    public static string PillText(LockState state, bool cameras = false) =>
+        state == LockState.PartiallyLocked ? "PARTIALLY LOCKED"
+        : cameras ? "MIC + CAMERA LOCKED"
+        : "MIC LOCKED";
 
     public static Color StateColor(LockState state) => state switch
     {
@@ -59,16 +65,16 @@ internal static class OverlayPainter
     /// The pill as a 32-bpp ARGB bitmap with a transparent background, including a soft shadow of
     /// <paramref name="padding"/> pixels on every side (the pill body is the bitmap minus the padding).
     /// </summary>
-    public static Bitmap RenderPill(LockState state, float scale, out int padding)
+    public static Bitmap RenderPill(LockState state, float scale, out int padding, bool cameras = false)
     {
         padding = OverlayLayout.Scale(PillShadow, scale);
-        Size body = MeasurePill(state, scale);
+        Size body = MeasurePill(state, scale, cameras);
         var bitmap = new Bitmap(body.Width + (2 * padding), body.Height + (2 * padding), PixelFormat.Format32bppArgb);
         try
         {
             using Graphics g = Graphics.FromImage(bitmap);
             g.Clear(Color.Transparent);
-            DrawPill(g, new Rectangle(padding, padding, body.Width, body.Height), state, scale);
+            DrawPill(g, new Rectangle(padding, padding, body.Width, body.Height), state, scale, cameras);
             return bitmap;
         }
         catch
@@ -95,16 +101,20 @@ internal static class OverlayPainter
         }
     }
 
-    /// <summary>Size of the pill body (without shadow) in physical pixels.</summary>
-    public static Size MeasurePill(LockState state, float scale)
+    /// <summary>
+    /// Size of the pill body (without shadow) in physical pixels: the padding, padlock and gap at this scale plus
+    /// the width of the text as it is really drawn (<see cref="DrawnTextWidth"/>), so the pill hugs any text at
+    /// any DPI (the width is rounded up, never down).
+    /// </summary>
+    public static Size MeasurePill(LockState state, float scale, bool cameras = false)
     {
         using Font font = PillFont(scale);
-        float textWidth = MeasureText(PillText(state), font).Width;
+        float textWidth = DrawnTextWidth(PillText(state, cameras), font);
         float width = ((PillPadLeft + PillGlyph + PillGlyphGap + PillPadRight) * scale) + textWidth;
         return new Size((int)MathF.Ceiling(width), OverlayLayout.Scale(PillHeight, scale));
     }
 
-    public static void DrawPill(Graphics g, Rectangle body, LockState state, float scale)
+    public static void DrawPill(Graphics g, Rectangle body, LockState state, float scale, bool cameras = false)
     {
         ArgumentNullException.ThrowIfNull(g);
         g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -140,25 +150,25 @@ internal static class OverlayPainter
 
         using Font font = PillFont(scale);
         float textLeft = glyphBox.Right + (PillGlyphGap * scale);
-        DrawCapsCentered(g, PillText(state), font, ink, textLeft, body.Top + (body.Height / 2f));
+        DrawCapsCentered(g, PillText(state, cameras), font, ink, textLeft, body.Top + (body.Height / 2f));
     }
 
     /// <summary>Size of the OSD flash in physical pixels (wider for longer text, within limits).</summary>
-    public static Size MeasureOsd(LockState state, string? detail, float scale)
+    public static Size MeasureOsd(LockState state, string? detail, float scale, bool cameras = false)
     {
         using Font title = new(FontFamilyName.Value, OsdTitlePx * scale, FontStyle.Bold, GraphicsUnit.Pixel);
         using Font small = new(FontFamilyName.Value, OsdDetailPx * scale, FontStyle.Regular, GraphicsUnit.Pixel);
         float fixedWidth = ((2 * OsdPad) + OsdBadge + OsdGap) * scale;
         float maxText = (OsdMaxWidth * scale) - fixedWidth;
-        SizeF titleSize = MeasureText(OsdTitle(state), title, maxText);
-        SizeF detailSize = MeasureText(OsdDetail(state, detail), small, maxText);
+        SizeF titleSize = MeasureText(OsdTitle(state, cameras), title, maxText);
+        SizeF detailSize = MeasureText(OsdDetail(state, detail, cameras), small, maxText);
         float width = Math.Clamp(fixedWidth + MathF.Max(titleSize.Width, detailSize.Width) + scale, OsdMinWidth * scale, OsdMaxWidth * scale);
         float height = MathF.Max(OsdMinHeight * scale, (2 * OsdPad * scale) + titleSize.Height + (OsdLineGap * scale) + detailSize.Height);
         return new Size((int)MathF.Ceiling(width), (int)MathF.Ceiling(height));
     }
 
     /// <summary>Paints the OSD flash: a coloured round badge with a padlock, a title and a detail line.</summary>
-    public static void DrawOsd(Graphics g, Rectangle bounds, LockState state, string? detail, float scale, bool dark)
+    public static void DrawOsd(Graphics g, Rectangle bounds, LockState state, string? detail, float scale, bool dark, bool cameras = false)
     {
         ArgumentNullException.ThrowIfNull(g);
         g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -190,8 +200,8 @@ internal static class OverlayPainter
         using Font small = new(FontFamilyName.Value, OsdDetailPx * scale, FontStyle.Regular, GraphicsUnit.Pixel);
         float textLeft = badgeBox.Right + (OsdGap * scale);
         float textWidth = bounds.Right - (OsdPad * scale) - textLeft;
-        string titleText = OsdTitle(state);
-        string detailText = OsdDetail(state, detail);
+        string titleText = OsdTitle(state, cameras);
+        string detailText = OsdDetail(state, detail, cameras);
         SizeF titleSize = MeasureText(titleText, title, textWidth);
         SizeF detailSize = MeasureText(detailText, small, textWidth);
         float blockHeight = titleSize.Height + (OsdLineGap * scale) + detailSize.Height;
@@ -207,25 +217,26 @@ internal static class OverlayPainter
         g.DrawString(detailText, small, detailBrush, new RectangleF(textLeft, top + titleSize.Height + (OsdLineGap * scale), textWidth, detailSize.Height + scale), format);
     }
 
-    public static string OsdTitle(LockState state) => state switch
+    /// <summary>The flash's title. <paramref name="cameras"/>: the change covered the cameras too (camera helper).</summary>
+    public static string OsdTitle(LockState state, bool cameras = false) => state switch
     {
-        LockState.Locked => "Microphones locked",
+        LockState.Locked => cameras ? "Microphones and cameras locked" : "Microphones locked",
         LockState.PartiallyLocked => "Partially locked",
         LockState.Locking => "Locking…",
         LockState.Unlocking => "Unlocking…",
-        _ => "Microphones unlocked",
+        _ => cameras ? "Microphones and cameras unlocked" : "Microphones unlocked",
     };
 
-    public static string OsdDetail(LockState state, string? detail) =>
+    public static string OsdDetail(LockState state, string? detail, bool cameras = false) =>
         !string.IsNullOrWhiteSpace(detail)
             ? detail
             : state switch
             {
-                LockState.Locked => "Every microphone is muted",
-                LockState.PartiallyLocked => "Some microphones could not be muted",
-                LockState.Locking => "Muting microphones",
-                LockState.Unlocking => "Restoring microphones",
-                _ => "Microphones are back as they were",
+                LockState.Locked => cameras ? "Every microphone is muted and every camera is off" : "Every microphone is muted",
+                LockState.PartiallyLocked => cameras ? "Some devices could not be locked" : "Some microphones could not be muted",
+                LockState.Locking => cameras ? "Muting microphones and turning cameras off" : "Muting microphones",
+                LockState.Unlocking => cameras ? "Restoring microphones and cameras" : "Restoring microphones",
+                _ => cameras ? "Microphones and cameras are back as they were" : "Microphones are back as they were",
             };
 
     private static Font PillFont(float scale) =>
@@ -242,6 +253,52 @@ internal static class OverlayPainter
         using var brush = new SolidBrush(color);
         using StringFormat format = TypographicFormat(wrap: false);
         g.DrawString(text, font, brush, left, baseline - ascent, format);
+    }
+
+    /// <summary>
+    /// How wide single-line text really comes out when drawn like the pill draws it. At small sizes GDI+ draws
+    /// grid-fitted text narrower than MeasureString reports (about 0.7 px per letter at 100 %, so "MIC + CAMERA
+    /// LOCKED" would get 13 px of extra space on its right), so the text is drawn once off-screen and its ink
+    /// measured. Falls back to the measured width for text without ink.
+    /// </summary>
+    private static float DrawnTextWidth(string text, Font font)
+    {
+        SizeF measured = MeasureText(text, font);
+        int width = (int)MathF.Ceiling(measured.Width) + 4;
+        int height = (int)MathF.Ceiling(measured.Height) + 2;
+        using var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+            g.Clear(Color.Transparent);
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            using var brush = new SolidBrush(Color.White);
+            using StringFormat format = TypographicFormat(wrap: false);
+            g.DrawString(text, font, brush, 0, 0, format);
+        }
+
+        BitmapData data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            int[] pixels = new int[data.Stride / 4 * height];
+            Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
+            int stride = data.Stride / 4;
+            for (int x = width - 1; x >= 0; x--)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    if ((pixels[(y * stride) + x] >>> 24) != 0)
+                    {
+                        return x + 1;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+
+        return measured.Width;
     }
 
     private static SizeF MeasureText(string text, Font font, float maxWidth = float.MaxValue)

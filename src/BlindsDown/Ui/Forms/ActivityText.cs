@@ -3,8 +3,15 @@ using BlindsDown.Core.Usage;
 
 namespace BlindsDown.Ui.Forms;
 
-/// <summary>One day of history, newest record first.</summary>
-internal sealed record HistoryDay(DateOnly Day, string Label, IReadOnlyList<UsageRecord> Records);
+/// <summary>One row of the Activity history: an app's use of a device, or a lock period.</summary>
+internal sealed record ActivityEntry(DateTimeOffset At, UsageRecord? Record, LockPeriod? Lock);
+
+/// <summary>One day of history, newest entry first.</summary>
+internal sealed record HistoryDay(DateOnly Day, string Label, IReadOnlyList<ActivityEntry> Entries)
+{
+    /// <summary>The app uses of the day, newest first (without the lock periods).</summary>
+    public IReadOnlyList<UsageRecord> Records => [.. Entries.Select(e => e.Record).OfType<UsageRecord>()];
+}
 
 /// <summary>
 /// Formatting for the Activity window. History is stored in UTC and always shown in local time; the
@@ -116,14 +123,25 @@ internal static class ActivityText
         return $"{record.AppName} used {what} ({Device(record.Kind, record.DeviceName)}) {PlainRange(record, zone, culture)}{via}{approx}.";
     }
 
-    /// <summary>Merges short gaps and groups by local day, newest day and newest record first.</summary>
-    public static List<HistoryDay> GroupByDay(IEnumerable<UsageRecord> history, TimeZoneInfo zone, DateTimeOffset now, CultureInfo culture)
+    /// <summary>
+    /// Merges short gaps and groups by local day, newest day and newest entry first. Lock periods
+    /// (<paramref name="locks"/>) are merged in by time, so the history reads as one timeline: which apps used a
+    /// device, and when BlindsDown was locked around it.
+    /// </summary>
+    public static List<HistoryDay> GroupByDay(
+        IEnumerable<UsageRecord> history,
+        TimeZoneInfo zone,
+        DateTimeOffset now,
+        CultureInfo culture,
+        IEnumerable<LockPeriod>? locks = null)
     {
         DateOnly today = LocalDay(now, zone);
-        return HistoryStore.MergeShortGaps(history, MergeGap)
-            .GroupBy(r => LocalDay(r.Start, zone))
+        IEnumerable<ActivityEntry> uses = HistoryStore.MergeShortGaps(history, MergeGap).Select(r => new ActivityEntry(r.Start, r, null));
+        IEnumerable<ActivityEntry> periods = (locks ?? []).Select(p => new ActivityEntry(p.At, null, p));
+        return uses.Concat(periods)
+            .GroupBy(e => LocalDay(e.At, zone))
             .OrderByDescending(g => g.Key)
-            .Select(g => new HistoryDay(g.Key, DayLabel(g.Key, today, culture), g.OrderByDescending(r => r.Start).ToList()))
+            .Select(g => new HistoryDay(g.Key, DayLabel(g.Key, today, culture), g.OrderByDescending(e => e.At).ToList()))
             .ToList();
     }
 

@@ -46,6 +46,7 @@ internal sealed class LockOverlayManager : IDisposable
     private readonly Control _marshal = new();
 
     private LockState _state = LockState.Unlocked;
+    private bool _camerasLocked;
     private OverlayOptions _options = new(false, false, OverlayCorner.TopRight, true);
     private string? _builtSignature;
     private nint _foregroundHook;
@@ -69,7 +70,10 @@ internal sealed class LockOverlayManager : IDisposable
     /// <summary>The windows currently showing the indicator (pills and edge lines).</summary>
     internal IReadOnlyList<OverlayWindow> Windows => [.. _pieces.Select(p => p.Window)];
 
-    public void Update(LockState state, AppSettings settings)
+    /// <summary>Shows or hides the indicator. <paramref name="camerasLocked"/> is true when the helper also has
+    /// the cameras locked, so the pill says "MIC + CAMERA LOCKED" instead of "MIC LOCKED" (it is sized to its
+    /// text on every monitor's DPI). A partial lock says "PARTIALLY LOCKED" either way.</summary>
+    public void Update(LockState state, AppSettings settings, bool camerasLocked = false)
     {
         ArgumentNullException.ThrowIfNull(settings);
         if (_disposed)
@@ -78,6 +82,7 @@ internal sealed class LockOverlayManager : IDisposable
         }
 
         _state = state;
+        _camerasLocked = camerasLocked;
         _options = new OverlayOptions(
             settings.ShowOverlay,
             settings.ShowScreenEdges,
@@ -177,7 +182,7 @@ internal sealed class LockOverlayManager : IDisposable
 
         if (_options.ShowPill)
         {
-            using Bitmap pill = OverlayPainter.RenderPill(_state, monitor.Scale, out int padding);
+            using Bitmap pill = OverlayPainter.RenderPill(_state, monitor.Scale, out int padding, _camerasLocked);
             var body = new Size(pill.Width - (2 * padding), pill.Height - (2 * padding));
             int margin = OverlayLayout.Scale(OverlayLayout.PillMargin, monitor.Scale);
             Rectangle bodyBounds = OverlayLayout.PlaceInCorner(monitor.WorkingArea, body, _options.Corner, margin);
@@ -238,7 +243,7 @@ internal sealed class LockOverlayManager : IDisposable
         string.Join(
             ';',
             monitors.Select(m => string.Create(CultureInfo.InvariantCulture, $"{m.Bounds}|{m.WorkingArea}|{m.Scale}"))
-                .Prepend(string.Create(CultureInfo.InvariantCulture, $"{_state}|{_options}")));
+                .Prepend(string.Create(CultureInfo.InvariantCulture, $"{_state}|{_camerasLocked}|{_options}")));
 
     private unsafe void StartWatching()
     {

@@ -27,7 +27,18 @@ internal static class CoreAudioErrors
     /// <summary>AUDCLNT_E_SERVICE_NOT_RUNNING: the Windows Audio service is stopped or restarting.</summary>
     public const int ServiceNotRunning = unchecked((int)0x88890010);
 
-    private const int AccessDenied = unchecked((int)0x80070005);
+    /// <summary>E_ACCESSDENIED.</summary>
+    public const int AccessDenied = unchecked((int)0x80070005);
+
+    /// <summary>HRESULT_FROM_WIN32(ERROR_PRIVILEGE_NOT_HELD): the caller lacks a privilege only administrators have.</summary>
+    public const int PrivilegeNotHeld = unchecked((int)0x80070522);
+
+    /// <summary>E_NOTIMPL.</summary>
+    public const int NotImplemented = unchecked((int)0x80004001);
+
+    /// <summary>REGDB_E_CLASSNOTREG: the COM class doesn't exist on this Windows.</summary>
+    public const int ClassNotRegistered = unchecked((int)0x80040154);
+
     private const int FileNotFound = unchecked((int)0x80070002);
     private const int DeviceNotConnected = unchecked((int)0x8007048F);
     private const int RpcServerDied = unchecked((int)0x80010007);

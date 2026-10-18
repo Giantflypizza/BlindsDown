@@ -28,7 +28,7 @@ internal sealed class AboutForm : Form
         DialogLayout.AddRow(content, DialogLayout.Text("BlindsDown", TextRole.Title, new Padding(0, 0, 0, 2)));
         DialogLayout.AddRow(content, DialogLayout.Hint("Version " + version, new Padding(0, 0, 0, 10)));
         DialogLayout.AddRow(content, DialogLayout.Text(
-            "A privacy lock for your microphones: one hotkey mutes them all, guards them while locked and restores them exactly as they were.",
+            "A privacy lock for your microphones and cameras: one hotkey mutes every microphone (and, with camera lock on, turns your cameras off), guards them while locked and restores them exactly as they were.",
             margin: new Padding(0, 0, 0, 12)));
 
         DialogLayout.AddRow(content, DialogLayout.Text(NoInternetSentence, TextRole.Strong, new Padding(0, 0, 0, 2)));
@@ -38,9 +38,10 @@ internal sealed class AboutForm : Form
         DialogLayout.AddRow(content, DialogLayout.Heading("Honest limits"));
         DialogLayout.AddRow(content, DialogLayout.Bullets(
         [
-            "Software can't stop malware that has administrator rights. Only a hardware mute switch is certain.",
+            "Software can't stop malware that has administrator rights. Only a camera cover or a hardware mute switch is certain.",
             "Malware running as you can unlock too, but not unseen: every unlock flashes on screen and changes the tray icon.",
             "Apps using exclusive mode, ASIO or kernel streaming can get around a software mute.",
+            "A camera that an app is using may refuse to turn off until the app lets go of it. BlindsDown says so and keeps trying.",
             "Some full-screen or elevated apps swallow hotkeys. Use the tray icon then; every change flashes on screen (and plays a sound if sounds are on).",
             "The lock applies to every Windows user on this PC.",
         ]));

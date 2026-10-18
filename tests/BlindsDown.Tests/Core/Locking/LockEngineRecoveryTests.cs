@@ -132,6 +132,75 @@ public sealed class LockEngineRecoveryTests
     }
 
     [Fact]
+    public void AfterACrashWhileLockingTheMicsAlreadyMutedStayMutedUntilTheUserChooses()
+    {
+        static LockWorld Setup()
+        {
+            var world = new LockWorld();
+            world.Mics.Add("a");
+            world.Mics.Add("b");
+            world.Engine.Initialize();
+            return world;
+        }
+
+        // Killed after "a" was muted and verified, before "b" was reached. The recovery dialog waits for the user.
+        int point = CrashPlan.Find(Setup, w => w.Engine.Lock(), "before SetMute(b, True)");
+        LockWorld world = Setup();
+        world.Crash.ArmAt(point);
+        Assert.Throws<SimulatedCrashException>(() => world.Engine.Lock());
+        Assert.Equal(LockPhase.Locking, world.Restart()!.Phase);
+
+        // Meanwhile an app unmutes "a": muted again at once, and by the safety poll if the notification is missed.
+        world.Mics.OtherAppSetsMute("a", false);
+        world.Pump();
+        Assert.True(world.Mics["a"].Muted);
+        world.Mics.OtherAppSetsMute("a", false);
+        world.Mics.DropNotifications();
+        world.Engine.Reconcile();
+        Assert.True(world.Mics["a"].Muted);
+        Assert.Single(world.AlertsOf(EngineAlertKind.UnmutedWhileLocked));
+
+        // Nothing else changes until the user chooses: "b" was not reached, and a new mic is left alone.
+        world.Mics.Add("new", notify: true);
+        world.Pump();
+        world.Engine.Reconcile();
+        Assert.False(world.Mics["b"].Muted);
+        Assert.False(world.Mics["new"].Muted);
+        Assert.Equal(LockState.Locking, world.Engine.Status.State);
+
+        world.Engine.Unlock(); // "Restore my devices"
+        Assert.All(world.Mics.All, m => Assert.False(m.Muted, m.ToString()));
+    }
+
+    [Fact]
+    public void AfterACrashWhileUnlockingNothingIsMutedAgainUntilTheUserChooses()
+    {
+        static LockWorld Setup()
+        {
+            var world = new LockWorld();
+            world.Mics.Add("a");
+            world.Mics.Add("b");
+            world.Engine.Initialize();
+            world.Engine.Lock();
+            return world;
+        }
+
+        int point = CrashPlan.Find(Setup, w => w.Engine.Unlock(), "after SetMute(b, False)");
+        LockWorld world = Setup();
+        world.Crash.ArmAt(point);
+        Assert.Throws<SimulatedCrashException>(() => world.Engine.Unlock());
+        Assert.Equal(LockPhase.Unlocking, world.Restart()!.Phase);
+
+        world.Mics.OtherAppSetsMute("a", false);
+        world.Pump();
+        world.Engine.Reconcile();
+
+        Assert.False(world.Mics["a"].Muted);
+        Assert.False(world.Mics["b"].Muted);
+        Assert.Empty(world.AlertsOf(EngineAlertKind.UnmutedWhileLocked));
+    }
+
+    [Fact]
     public void LockAfterAnInterruptedUnlockLocksEverythingAgain()
     {
         static LockWorld Setup()

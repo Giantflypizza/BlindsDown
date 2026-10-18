@@ -20,6 +20,10 @@ internal sealed class CrashPlan
     /// <summary>Description of the point that crashed, for failure messages.</summary>
     public string? LastCrash { get; private set; }
 
+    /// <summary>Runs at every point, armed or not: lets another app act at an exact moment, e.g. unmute a
+    /// microphone right before BlindsDown turns it off.</summary>
+    public Action<string>? Interject { get; set; }
+
     /// <summary>Crash at the <paramref name="point"/>-th point from now (1-based).</summary>
     public void ArmAt(int point)
     {
@@ -46,6 +50,7 @@ internal sealed class CrashPlan
 
     public void Point(string where)
     {
+        Interject?.Invoke(where);
         if (!_counting)
         {
             return;
@@ -153,12 +158,24 @@ internal sealed class FailingJournalStore : IJournalStore
     public void Delete() => Stored = null;
 }
 
-/// <summary>A pending store whose reads fail transiently (e.g. a virus scanner holds the file).</summary>
+/// <summary>A pending store whose reads or writes fail transiently (e.g. another program holds the file, or the disk
+/// is full), like <see cref="FilePendingRestoreStore"/> then.</summary>
 internal sealed class FlakyPendingRestoreStore(IPendingRestoreStore inner) : IPendingRestoreStore
 {
     public bool FailLoads { get; set; }
 
-    public List<LockAction> Load() => FailLoads ? [] : inner.Load();
+    public bool FailSaves { get; set; }
 
-    public void Save(IReadOnlyCollection<LockAction> actions) => inner.Save(actions);
+    public List<LockAction> Load() =>
+        FailLoads ? throw new PendingRestoreUnreadableException("Held by another program (simulated).") : inner.Load();
+
+    public void Save(IReadOnlyCollection<LockAction> actions)
+    {
+        if (FailSaves)
+        {
+            throw new IOException("There is not enough space on the disk.");
+        }
+
+        inner.Save(actions);
+    }
 }
