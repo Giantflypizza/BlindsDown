@@ -389,7 +389,9 @@ public sealed class HelperPipeTests : IDisposable
 
         HelperPipeServerInfo server = await client.InspectServerAsync(Timeout);
 
-        Assert.Equal(me.User!.Value, server.OwnerSid);
+        // Windows makes new objects owned by the token's default owner: the user, or Administrators when elevated (as on
+        // the CI machines).
+        Assert.Equal(me.Owner!.Value, server.OwnerSid);
         Assert.Equal((uint)self.SessionId, server.SessionId);
         Assert.Equal((uint)Environment.ProcessId, server.ProcessId);
         Assert.NotNull(HelperPipeAcl.ServerProblem(server.OwnerSid, server.SessionId!.Value));
